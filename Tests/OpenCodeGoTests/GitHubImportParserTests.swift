@@ -55,7 +55,7 @@ final class GitHubImportParserTests: XCTestCase {
         XCTAssertEqual(padded[0].kind, .totpSecret)
     }
 
-    /// S1:共享判定函数(原 classifyCredential / inferKind 两份实现收敛于此)
+    /// S1:共享判定函数(原 classifyCredential / inferKind 两份实现收敛于此,严格 base32)
     func testCredentialKindSharedFunction() {
         // 6 位纯数字 → 一次性验证码(含首尾空白裁剪)
         XCTAssertEqual(GitHubCredentialKind.kind(for: "123456"), .oneTimeCode)
@@ -71,19 +71,19 @@ final class GitHubImportParserTests: XCTestCase {
         XCTAssertNil(GitHubCredentialKind.kind(for: "   "))
     }
 
-    /// L5:严格判定 —— 截断/非法 padding 的 secret 不再被识别为 TOTP(入库路径)
-    func testCredentialKindStrictRejectsTruncatedSecret() {
-        // 截断的 secret:宽松解码能解出 ≥ 8 字节,严格判定必须拒绝
-        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQGE"))
+    /// L5/收敛:kind(for:) 已统一为严格 base32 —— 截断/非法 padding 的 secret 不再被识别为 TOTP
+    func testCredentialKindRejectsTruncatedSecret() {
+        // 截断的 secret:严格解码拒绝(宽松解码能解出 ≥ 8 字节)
+        XCTAssertNil(GitHubCredentialKind.kind(for: "GEZDGNBVGY3TQOJQGE"))
         // 余量位非 0 / '=' 位置非法
-        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZDGNB"))
-        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZD=GNBVGY3TQOJQ"))
-        // 合法样本仍识别(与宽松版一致)
-        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQ"), .totpSecret)
-        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQ===="), .totpSecret)
-        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "123456"), .oneTimeCode)
-        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "ABC123"))
-        XCTAssertNil(GitHubCredentialKind.kindStrict(for: ""))
+        XCTAssertNil(GitHubCredentialKind.kind(for: "GEZDGNB"))
+        XCTAssertNil(GitHubCredentialKind.kind(for: "GEZD=GNBVGY3TQOJQ"))
+        // 合法样本仍识别
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "GEZDGNBVGY3TQOJQ"), .totpSecret)
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "GEZDGNBVGY3TQOJQ===="), .totpSecret)
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "123456"), .oneTimeCode)
+        XCTAssertNil(GitHubCredentialKind.kind(for: "ABC123"))
+        XCTAssertNil(GitHubCredentialKind.kind(for: ""))
     }
 
     /// L5:导入路径用严格判定,截断 secret 整行报格式无效

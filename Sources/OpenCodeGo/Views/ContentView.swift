@@ -42,6 +42,9 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     hero
+                    if let loadError = store.loadError {
+                        loadErrorBanner(loadError)
+                    }
                     tabPicker
                     if tab == .opencode {
                         if store.accounts.isEmpty {
@@ -126,6 +129,18 @@ struct ContentView: View {
             }
         }
         .padding(.top, 30) // hiddenTitleBar 下给交通灯留空间
+    }
+
+    /// accounts.json 损坏等加载失败的红色警告条(样式对齐账号卡错误条)
+    private func loadErrorBanner(_ message: String) -> some View {
+        Label(message, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(.red)
+            .lineLimit(2)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.red.opacity(0.10)))
     }
 
     private func statChip(value: String, label: String) -> some View {
