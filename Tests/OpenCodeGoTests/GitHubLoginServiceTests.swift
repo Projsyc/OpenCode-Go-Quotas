@@ -89,6 +89,58 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertEqual(d.step, .needsManualIntervention("请在窗口中输入两步验证码,完成后等待自动捕获"))
     }
 
+    // MARK: - decide:内联 2FA 探测(登录页内直接渲染 #otp,路径仍是 /login 或 /sessions)
+
+    /// 修复②:凭据已提交后又回到 /login,有 TOTP 时应探测内联 OTP 并返回填码 JS,
+    /// 而不是直接按「登录失败」转手动
+    func testDecideInlineOTPOnLoginPageProbesAndFills() {
+        for path in ["/login", "/login?return_to=%2Fsettings", "/sessions", "/session"] {
+            let d = GitHubLoginService.decide(
+                for: url("https://github.com\(path)"), githubUsername: "u", githubPassword: "p",
+                totpCode: "123456", state: .fillingCredentials)
+
+            XCTAssertEqual(d.step, .twoFactor, "\(path): 内联 OTP 探测应进入 2FA 等待态")
+            XCTAssertTrue(d.isOTPProbe, "\(path): 应标记为 OTP 探测决策,由视图解释结果")
+            let js = d.javascript ?? ""
+            XCTAssertTrue(js.contains("otp"), "\(path): 应注入 OTP 填码 JS")
+            XCTAssertTrue(js.contains("\"123456\""), "\(path): 验证码应经 JSON 转义嵌入 JS")
+        }
+    }
+
+    func testDecideInlineOTPOnLoginPageWithoutTotpGoesManual() {
+        let d = GitHubLoginService.decide(
+            for: url("https://github.com/login"), githubUsername: "u", githubPassword: "p",
+            totpCode: nil, state: .fillingCredentials)
+        XCTAssertEqual(d.step, .needsManualIntervention("GitHub 登录未成功,请在窗口中手动登录"))
+        XCTAssertNil(d.javascript)
+        XCTAssertFalse(d.isOTPProbe)
+    }
+
+    /// 修复②:探测不依赖 URL 路径——github.com 任意页面(非登录/会话路径)在凭据已提交后
+    /// 也追加 OTP 探测;未命中时由视图按现有规则继续
+    func testDecideInlineOTPProbeOnAnyGithubPage() {
+        for state in [GitHubLoginStep.fillingCredentials, .twoFactor] {
+            let d = GitHubLoginService.decide(
+                for: url("https://github.com/settings/security"), githubUsername: "u", githubPassword: "p",
+                totpCode: "123456", state: state)
+
+            XCTAssertEqual(d.step, state, "非登录路径:状态保持当前步骤")
+            XCTAssertTrue(d.isOTPProbe, "凭据已提交后任意 github 页面都应追加 OTP 探测")
+            let js = d.javascript ?? ""
+            XCTAssertTrue(js.contains("one-time-code"), "探测 JS 应含 one-time-code 选择器")
+        }
+    }
+
+    /// 无 TOTP 时其他 github 页面不追加探测,行为与修复前一致
+    func testDecideOtherGithubPageWithoutTotpKeepsState() {
+        let d = GitHubLoginService.decide(
+            for: url("https://github.com/settings"), githubUsername: "u", githubPassword: "p",
+            totpCode: nil, state: .fillingCredentials)
+        XCTAssertEqual(d.step, .fillingCredentials)
+        XCTAssertNil(d.javascript)
+        XCTAssertFalse(d.isOTPProbe)
+    }
+
     // MARK: - decide:通行密钥 / 设备验证
 
     func testDecideWebauthnPageGoesManual() {
@@ -219,6 +271,15 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertFalse(js.contains("var user = \"a\"b"))
     }
 
+    /// 修复①:注入成功返回值须明确区分「已填并提交」与「幂等已填」
+    func testFillCredentialsJSReturnsDistinctSuccessMarkers() {
+        let js = GitHubLoginService.fillCredentialsJS(username: "alice", password: "s3cret")
+        XCTAssertTrue(js.contains("return 'filled';"), "已填并提交应返回 filled")
+        XCTAssertTrue(js.contains("return 'already-filled';"), "值已一致(幂等)应返回 already-filled")
+        XCTAssertTrue(js.contains("return 'no-login-field';"), "表单未渲染应返回 no-login-field")
+        XCTAssertTrue(js.contains("return 'no-form';"))
+    }
+
     func testFillCredentialsJSNoScriptInjection() {
         let payload = "\"); alert(1); //"
         let js = GitHubLoginService.fillCredentialsJS(username: payload, password: payload)
@@ -232,6 +293,51 @@ final class GitHubLoginServiceTests: XCTestCase {
         let js = GitHubLoginService.fillOTPJS(code: "123 456")
         XCTAssertTrue(js.contains("otp"))
         XCTAssertTrue(js.contains("\"123 456\""))
+    }
+
+    /// 修复②:内联 2FA 探测 JS 须覆盖 #otp / input[name="otp"] / input[autocomplete="one-time-code"]
+    /// 三种选择器,命中即填码提交,未命中返回 no-otp
+    func testProbeAndFillOTPJSUsesThreeSelectors() {
+        let js = GitHubLoginService.probeAndFillOTPJS(code: "654321")
+        XCTAssertTrue(js.contains("getElementById('otp')"), "应探测 #otp")
+        XCTAssertTrue(js.contains(#"input[name="otp"]"#), "应探测 input[name=\"otp\"]")
+        XCTAssertTrue(js.contains(#"input[autocomplete="one-time-code"]"#), "应探测 autocomplete 选择器")
+        XCTAssertTrue(js.contains("return 'otp-filled';"))
+        XCTAssertTrue(js.contains("return 'no-otp';"))
+        XCTAssertTrue(js.contains("\"654321\""), "验证码应经 JSON 转义嵌入 JS")
+        XCTAssertTrue(js.contains("form.submit()"), "应复用 OTP 注入逻辑(填值 + input 事件 + 提交)")
+    }
+
+    // MARK: - 注入结果分类(修复①/②的状态机推进依据)
+
+    func testClassifyCredentialInjectResultFilledIsSuccess() {
+        for result in ["filled", "already-filled"] {
+            XCTAssertEqual(
+                GitHubLoginService.classifyCredentialInjectResult(result), .success,
+                "\(result) 应视为注入成功,推进状态机")
+        }
+    }
+
+    func testClassifyCredentialInjectResultRetryCases() {
+        for result in [String?].init(arrayLiteral: "no-login-field", "no-form", nil, "weird-return") {
+            XCTAssertEqual(
+                GitHubLoginService.classifyCredentialInjectResult(result), .retry,
+                "\(String(describing: result)) 应视为表单未渲染,保持 .githubLoginForm 重试")
+        }
+    }
+
+    func testClassifyOTPProbeResult() {
+        XCTAssertEqual(GitHubLoginService.classifyOTPProbeResult("otp-filled"), .filled)
+        for result in [String?].init(arrayLiteral: "no-otp", "no-form", nil, "submitted") {
+            XCTAssertEqual(
+                GitHubLoginService.classifyOTPProbeResult(result), .notPresent,
+                "\(String(describing: result)) 应视为页面无 OTP 输入框,按现有规则继续")
+        }
+    }
+
+    func testCredentialInjectRetryParameters() {
+        XCTAssertEqual(GitHubLoginService.credentialInjectMaxRetries, 5, "表单未渲染最多重试 5 次")
+        XCTAssertEqual(GitHubLoginService.credentialInjectRetryDelayMs, 500, "重试间隔 500ms")
     }
 
     func testReadCookiesJSUsesDocumentCookieAndOAuthSelector() {
