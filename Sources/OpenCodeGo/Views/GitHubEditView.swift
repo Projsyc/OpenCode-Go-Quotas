@@ -130,7 +130,7 @@ struct GitHubEditView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(ThemeAccent())
+                .tint(Theme.accentSolid)
                 .keyboardShortcut(.defaultAction)
             }
         }
@@ -216,8 +216,4 @@ private enum SaveError: LocalizedError {
         case .message(let m): return m
         }
     }
-}
-
-private func ThemeAccent() -> Color {
-    Color(hex: 0x7C6CF0)
 }

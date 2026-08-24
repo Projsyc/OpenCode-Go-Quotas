@@ -122,7 +122,7 @@ struct ContentView: View {
                     Label("添加账号", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(ThemeAccent())
+                .tint(Theme.accentSolid)
             }
         }
         .padding(.top, 30) // hiddenTitleBar 下给交通灯留空间
@@ -160,7 +160,7 @@ struct ContentView: View {
                         .foregroundStyle(tab == tabOption ? Color.white : Color.secondary)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 7)
-                        .background(Capsule().fill(tab == tabOption ? ThemeAccent() : Color.clear))
+                        .background(Capsule().fill(tab == tabOption ? Theme.accentSolid : Color.clear))
                 }
                 .buttonStyle(.plain)
             }
@@ -193,7 +193,7 @@ struct ContentView: View {
                     Label("添加账号", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(ThemeAccent())
+                .tint(Theme.accentSolid)
             }
             if githubStore.accounts.isEmpty {
                 githubEmptyState
@@ -238,7 +238,7 @@ struct ContentView: View {
                     Label("添加账号", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(ThemeAccent())
+                .tint(Theme.accentSolid)
             }
         }
         .frame(maxWidth: .infinity)
@@ -280,7 +280,7 @@ struct ContentView: View {
                 Label("添加账号", systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
-            .tint(ThemeAccent())
+            .tint(Theme.accentSolid)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 80)
@@ -297,9 +297,4 @@ struct ContentView: View {
             Spacer()
         }
     }
-}
-
-/// 主操作按钮的渐变着色(需要返回 Color 的方法包装)
-private func ThemeAccent() -> Color {
-    Color(hex: 0x7C6CF0)
 }

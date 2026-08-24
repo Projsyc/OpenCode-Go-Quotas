@@ -14,6 +14,9 @@ enum Theme {
         colors: [Color(hex: 0x5B8DEF), Color(hex: 0x8B5CF6), Color(hex: 0xEC6EAD)],
         startPoint: .topLeading, endPoint: .bottomTrailing)
 
+    /// 主题强调色的纯色形态(用于 tint / 胶囊填充等需要单一 Color 的场景)
+    static let accentSolid = Color(hex: 0x7C6CF0)
+
     /// 光斑配色:亮色模式低透明度,暗色模式稍高(暗色下过曝,已从 0.16 微调至 0.12)
     static func blobColor(_ scheme: ColorScheme, hex: UInt32) -> Color {
         Color(hex: hex).opacity(scheme == .dark ? 0.12 : 0.10)
