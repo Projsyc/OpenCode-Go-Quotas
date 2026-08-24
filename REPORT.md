@@ -44,4 +44,21 @@ rule 4 的 `default` 与 rule 5 的「按当前状态延续」是合并语义而
 | `9cfabfc` fix(loginaudit) | 视图:终止标记、取消/超时残留回调拦截、一次性注入取消管理、OTP 探测竞态守卫、步骤变化重启超时、start() 幂等复位 |
 | `b079baf` test(loginaudit) | 新增 6 条单测(终态守卫 / 域名判定 / 阶段判定 / 超时重启×3) |
 
-门禁:204 测试全绿(198 基线 + 6 新增);`swift build`、`git diff --check` 通过。
+## 门禁结果
+
+- swift build: 通过(Build complete)
+- swift test: **204 通过 / 0 失败**(198 基线 + 6 新增)
+- git diff --check: 通过(工作树干净,无空白错误)
+
+## 遇到的问题
+
+- 无阻塞问题。3 项建议不在本轮修复范围(见审计 #8/#9):一次性注入结果不解释的重试、阶段级守护超时;均建议后续迭代。
+- 说明:修复 #1 使 `succeeded` 兼作流程终止标记(命名语义扩展),已在代码注释中注明;cancel() 在 .done 期间保持 no-op、.failed 后仍可取消收尾,行为与修复前一致。
+
+## 证据
+
+- 测试输出:Executed 204 tests, with 0 failures(0 unexpected)
+- 均已完成于分支 ws-loginaudit(4 commit,未 merge、未 push),worktree 原地保留
+
+门禁: PASSED
+结论: OK
