@@ -276,6 +276,85 @@ final class QuotaClientTests: XCTestCase {
         }
     }
 
+    // MARK: 成本诊断(historyDiag)
+
+    /// 每个测试独立的临时目录(自动建,teardown 删除;绝不碰 ~/Library/Logs)
+    private func makeTempDir(_ name: String) -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("QuotaDiagTests-\(name)-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
+
+    func testDiagContextSlicesBothSidesWithRadius() {
+        // needle 两侧各取 radius 字符
+        let text = "aaaaaaCOST:123bbbbbb"
+        let r = text.range(of: "COST:123")!
+        let ctx = QuotaClient.diagContext(in: text, around: r, radius: 3)
+        XCTAssertEqual(ctx, "aaaCOST:123bbb")
+    }
+
+    func testDiagContextClampsAtTextBounds() {
+        // 左侧越界 → 收敛到开头;右侧越界 → 收敛到结尾
+        let text = "COST:123\nrest"
+        let r = text.range(of: "COST:123")!
+        let ctx = QuotaClient.diagContext(in: text, around: r, radius: 10)
+        XCTAssertEqual(ctx, "COST:123\\nrest", "换行应转义为字面 \\n")
+    }
+
+    func testDiagContextEscapesCRAndLF() {
+        let text = "before\r\nCOST:123\nafter"
+        let r = text.range(of: "COST:123")!
+        let ctx = QuotaClient.diagContext(in: text, around: r, radius: 60)
+        XCTAssertFalse(ctx.contains("\n"), "原始换行不应残留在上下文中")
+        XCTAssertFalse(ctx.contains("\r"))
+        XCTAssertTrue(ctx.contains("\\n"))
+        XCTAssertTrue(ctx.contains("\\r"))
+    }
+
+    func testHistoryDiagMatchFindsFirstCostMatch() {
+        // 复现 98M 之谜机制:cost 正则从其它键(_cost:)中捕获数字
+        let slice = #"..., total_cost:98711933, cost:0.0123, ..."#
+        let diag = QuotaClient.historyDiagMatch(in: slice)
+        XCTAssertNotNil(diag)
+        XCTAssertEqual(diag?.match, "cost:98711933", "首个 cost: 匹配应来自 total_cost 字段")
+        XCTAssertTrue(diag?.ctx.contains("total_") ?? false, "上下文应暴露匹配来自 total_cost")
+        XCTAssertTrue(diag?.ctx.contains("0.0123") ?? false)
+    }
+
+    func testParseHistoryBodyWritesDiagForAnomalousCost() throws {
+        let dir = makeTempDir("anomalous")
+        // total_cost 在 cost 之前:正则 cost:\s*\d+ 会优先命中 total_cost 的 98711933
+        let body = """
+        const data1 = { id:"usg_Cross1", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, total_cost:98711933, cost:0.0123, keyID:"key_1", sessionID:"ses_1", plan:null };
+        """
+
+        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].cost, 98_711_933, accuracy: 0.001,
+                       "historyDouble 与诊断用同一正则:异常值已解析为天文数字")
+
+        let logURL = dir.appendingPathComponent("history.log")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: logURL.path))
+        let content = try String(contentsOf: logURL, encoding: .utf8)
+        XCTAssertTrue(content.contains("id=usg_Cross1"))
+        XCTAssertTrue(content.contains("model=gpt-test"))
+        XCTAssertTrue(content.contains("cost=98711933.0"))
+        XCTAssertTrue(content.contains("match=cost:98711933"), "应记录原始匹配串")
+        XCTAssertTrue(content.contains("total_cost"), "ctx 应包含匹配处上下文")
+    }
+
+    func testParseHistoryBodySkipsDiagBelowThreshold() throws {
+        let dir = makeTempDir("normal")
+        // historyBody 两条记录 cost 分别为 0.0123 / 0.045,均低于阈值 → 不写日志
+        let items = QuotaClient.parseHistoryBody(historyBody, diag: HistoryDiagSink(directory: dir))
+
+        XCTAssertEqual(items.count, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("history.log").path))
+    }
+
     // MARK: 校验
 
     func testValidateWorkspaceId() {
