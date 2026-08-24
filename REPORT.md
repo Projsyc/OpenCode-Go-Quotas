@@ -1,67 +1,57 @@
-# ghatips 汇报(2026-08-25)
-
-工作区:`dm-wt-ghatips`(分支 `ws-ghatips`,基于 f6dd144 / b27-ghaudit 合并点)
-任务:落地 ghaudit 建议 3 项 —— 密码首尾空白静默 trim(中)、「读取 TOTP 密钥…」误导(低)、
-「第 0 行:<错误>」(极低)。
-
-## 方案选型说明(密码 trim 提示)
-
-选型:**去除 + 提示**(与现有 trim 行为一致,仅补用户知情)。落盘保留原值方案改动面大
-(store add/update/importBatch 四处语义齐变),且保留原值会引入「校验值 ≠ 保存值」的
-新不一致,故弃。
-
-- **导入预览行**:解析器在 trim 前检测密码原始字段,新增 `GitHubImportRow.passwordHadEdgeWhitespace`
-  标志(仅密码列,不扩散);预览行据其显示橙色「已去除密码首尾空白」。
-- **编辑表单**:密码输入框下方实时提示「密码含首尾空白,保存时会自动去除(如密码本身以
-  空格开头/结尾,请确认)」—— 保存流程零改动(trim 行为不变),用户在提交前即知情。
-- **误报控制**(关键设计):导入文本 `user1, pass123` 的单个空格是**分隔符约定**(应用
-  自带示例格式),不能算密码内容,否则提示会出现在几乎每一行。因此判定规则:
-  - 引号包裹的字段(内容按字面,如 `" pass123 "`)→ 首尾空白是密码内容 → 提示;
-  - 未加引号 → 仅当**单侧空白 ≥ 2 个字符**才提示(单侧 1 个 = 分隔符约定,不算);
-  - 空格分隔格式(token 按空白切分)天然无首尾空白,不提示;纯空白字段由既有
-    「密码至少 6 个字符」校验兜底,不提示。
-- 用户名 trim 保持现状(用户名规则不允许空白,无提示必要);提示未扩散到凭据字段。
+# histdiag 汇报(2026-08-25)
 
 ## 实际改动
 
-- `Sources/OpenCodeGo/GitHubImportParser.swift` →
-  - `GitHubImportRow` 新增 `passwordHadEdgeWhitespace: Bool = false`(memberwise init 向后兼容);
-  - `csvSplit` 返回各字段「是否被引号包裹」;`splitFields` 改为返回
-    `(fields, passwordHadEdgeWhitespace)`;
-  - 新增纯函数 `passwordHasEdgeWhitespace(_:treatAsLiteral:)`(判定规则见上,可单测);
-  - 密码仍按既有行为 trim 入库,无行为变更。
-- `Sources/OpenCodeGo/Views/GitHubImportView.swift` →
-  - `GitHubImportPreviewRow.passwordHint`(计算属性,文案 `已去除密码首尾空白`);
-  - 预览行成功项旁显示橙色提示;新增 `skipText(_:)` 静态函数替代硬编码
-    「第 \(lineNumber) 行:」,lineNumber 0 → 「导入错误:<消息>」。
-- `Sources/OpenCodeGo/Views/GitHubEditView.swift` →
-  - 静态纯函数 `passwordContainsEdgeWhitespace(_:)` + 密码字段下实时提示(橙色 Label)。
-- `Sources/OpenCodeGo/Views/GitHubAccountCardView.swift` →
-  - keychain 缺凭据时「读取 TOTP 密钥…」→「未找到密钥」。
-- 测试:+9(解析器 5、预览/文案 3、编辑表单判定 1,新文件 `GitHubEditViewTests.swift`)。
+- `Sources/OpenCodeGo/HistoryDiagSink.swift`(新增)→ 与 `LoginLogSink` 同风格的诊断输出器:
+  directory 可注入(默认 `~/Library/Logs/OpenCodeGo/history.log`),追加写、自动建目录、失败静默。
+- `Sources/OpenCodeGo/QuotaClient.swift` →
+  - `RX.firstFullMatch`:新增正则「完整匹配串 + Range」助手(诊断取原始匹配串用);
+  - 常量 `historyDiagCostThreshold = 5.0`、`historyDiagContextRadius = 60`;
+  - 纯函数 `diagContext(in:around:radius:)`:匹配串两侧各 60 字符,`\n`/`\r` 转义为字面 `\n`/`\r`;
+  - `historyDiagMatch(in:)`:返回 `cost:` 正则首个**完整匹配串**与上下文;
+  - `parseHistoryBody(_:diag:)`:新增默认参数 `diag`(测试注入;生产默认写真实路径)。
+    cost > 5 时旁路追加一行诊断,解析结果与错误路径零变化。
+- `Tests/OpenCodeGoTests/HistoryDiagSinkTests.swift`(新增):5 条(建文件/追加/深层目录/静默失败/文件名隔离)。
+- `Tests/OpenCodeGoTests/QuotaClientTests.swift`:新增 6 条(上下文截取、边界收敛、换行转义、
+  跨字段抢匹配、超阈值集成写日志、低于阈值不写)。
+
+## 诊断格式(history.log 每行一条)
+
+```
+[ISO8601] id=<usg_xxx> model=<model> cost=<解析后数值> match=<原始匹配串> ctx=<两侧各60字符,换行转义>
+```
+
+示例(集成测试真实产出,复现 98M 机制 —— `cost` 正则从 `total_cost` 字段抢到 98711933):
+
+```
+[2026-08-25T06:59:43Z] id=usg_Cross1 model=gpt-test cost=98711933.0 match=cost:98711933 ctx=...total_cost:98711933...
+```
+
+- `match` = `cost:\s*(\d+(?:\.\d+)?)` 的**完整匹配串**(从 `cost:` 起,含数字),比只记数字更能定位来源;
+- `ctx` = match 左侧 60 + 右侧 60 字符;原始换行/回车转义为字面 `\n` / `\r`(两字符文本)防串行;
+- 仅含 id/model/cost/上下文,无任何凭据(红线)。
 
 ## 门禁结果
 
-- `swift build`:通过(无警告/错误);
-- `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`:**236 通过 / 0 失败**
-  (基线 227,+9 新增);
-- `git diff --check`:通过。
+- `swift build`:通过(Build complete!,8.32s)
+- `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`:**247 通过 / 0 失败**(原 236 + 新增 11)
+- `git diff --check`:通过
 
 ## 遇到的问题
 
-- **误报风险(设计取舍)**:最初按「字段含任意首尾空白即提示」实现,发现应用自带示例格式
-  `user1, 密码123`(分隔符后单个空格)会让提示出现在几乎每个预览行 → 收敛为「引号字段
-  按字面 + 未引号字段单侧 ≥ 2 空白」规则,并补配套单测(见方案选型说明)。
-- **行级 trim 吃掉最后字段尾随空格**:整行先 `trimmingCharacters(.whitespacesAndNewlines)`,
-  `user1,pass123 `(密码为行末最后一个字段)的尾随空格在解析前已被行级 trim 消耗,
-  无法与「行尾空白」区分 —— 固有歧义,未提示;编辑表单路径(原始输入无行级 trim)不受影响。
-- 超出边界文件零改动;README 未提及此细节,无需更新。
+- 无阻塞项。两点说明:
+  1. 提交 commit message 中 `$5` 触发沙箱 simple_expansion 保护 → 改写为「5 美元」后提交成功;
+  2. match 的取法界定:prompt 未明示 match 是「捕获组数字」还是「正则整体」,实现取**正则整体**
+     (如 `cost:98711933`),因为它在诊断时严格更有信息量(能看出匹配起点是否位于 `_cost:` 等
+     其它键内),与 `cost=<解析后数值>` 不重复。
+- 若后续拿到真实响应样本,直接查看 `~/Library/Logs/OpenCodeGo/history.log` 中
+  `match`/`ctx` 即可定位 98M 数值来自哪个字段;用户无需任何额外操作(打开一次用量历史即触发)。
 
 ## 证据
 
-- 测试输出:`Executed 236 tests, with 0 failures`。
-- 回归保护:既有 227 测试全部保持通过,其中 CRLF/引号/空格分隔等解析测试证明
-  `csvSplit` 签名改动无行为回归。
+- `swift test` 输出摘要:`Executed 247 tests, with 0 failures`
+- 集成测试断言:超阈值记录写 `history.log` 且含 `match=cost:98711933`/`total_cost`;
+  低于阈值(0.0123/0.045)不创建日志文件;现有 236 条测试全部保持通过。
 
 门禁: PASSED
 结论: OK
