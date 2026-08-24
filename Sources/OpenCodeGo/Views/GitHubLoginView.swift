@@ -4,7 +4,8 @@ import WebKit
 /// GitHub 自动登录 opencode.ai 的登录 sheet。
 ///
 /// 流程:加载 opencode 工作区页 →(未登录)→ GitHub OAuth → 自动填用户名/密码 →
-/// 2FA(有 TOTP 自动填,否则提示手动)→ 自动点「Authorize」→ 跳回 opencode →
+/// 2FA(有 TOTP 自动填,否则提示手动;登录页内直接渲染的 #otp 内联形态也会自动填)→
+/// 自动点「Authorize」→ 跳回 opencode →
 /// 轮询捕获 auth cookie(Fe26. 开头)→ 回调父视图填入表单。
 ///
 /// 所有决策由 `GitHubLoginService.decide` 完成;本视图只做 I/O:
@@ -40,6 +41,10 @@ struct GitHubLoginView: View {
     @State private var succeeded = false
     @State private var pollTimer: Timer?
     @State private var timeoutTask: Task<Void, Never>?
+    /// 在途注入(凭据重试 / 内联 OTP 探测):新决策或页面消失时取消,防止旧页面上下文误注入
+    @State private var injectionTask: Task<Void, Never>?
+    /// 凭据注入重试中(表单未渲染):状态保持 .githubLoginForm,状态栏显示「等待表单渲染…」
+    @State private var isWaitingFormRender = false
 
     private let service = GitHubLoginService()
     private static let loginTimeout: Duration = .seconds(300)
@@ -67,6 +72,7 @@ struct GitHubLoginView: View {
         .onDisappear {
             stopPolling()
             stopTimeout()
+            cancelPendingInjection()
             // 兜底清理:sheet 被编程式关闭 / 窗口直接关闭时,成功/取消/超时三条路径都
             // 不会走到 wipeStore,这里全清 nonPersistent 会话,不留 Cookie 残留。
             // removeData 幂等,与其余清理路径重复调用安全。
@@ -142,7 +148,7 @@ struct GitHubLoginView: View {
         switch currentStep {
         case .idle: return "准备中…"
         case .loadingLoginPage: return "正在打开 opencode.ai…"
-        case .githubLoginForm: return "正在自动完成 GitHub 登录…"
+        case .githubLoginForm: return isWaitingFormRender ? "等待表单渲染…" : "正在自动完成 GitHub 登录…"
         case .fillingCredentials: return "正在提交登录信息…"
         case .twoFactor: return "正在自动输入两步验证码…"
         case .waitingOAuthRedirect: return "登录成功,正在读取 Cookie…"
@@ -235,6 +241,8 @@ struct GitHubLoginView: View {
 
         // 同一 URL + 同一决策不重复处理(didFinish 可能对同一页面重复回调)
         if decision == lastDecision, lastDecidedURL == url { return }
+        // 新决策:页面上下文已变化,取消上一轮未完成的注入(凭据重试 / OTP 探测)
+        cancelPendingInjection()
         lastDecision = decision
         lastDecidedURL = url
 
@@ -249,24 +257,128 @@ struct GitHubLoginView: View {
         }
 
         guard let js = decision.javascript else { return }
-        // 只注入一次:同一 (step, js) 不重复注入(防止表单未渲染时的重复提交)
+        // 只注入一次:同一 (step, js) 不重复注入(防止表单未渲染时的重复提交);
+        // 凭据注入的受控重试走 injectCredentials,不受此去重约束
         if let last = lastExecutedJS, last.step == decision.step, last.js == js { return }
         lastExecutedJS = (decision.step, js)
-        // didFinish 后延时注入,防表单尚未渲染
-        if let wv = webView {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                wv.evaluateJavaScript(js) { _, error in
-                    if let error {
-                        NSLog("GitHubLogin: JS 注入失败: %@", error.localizedDescription)
-                    }
+
+        // 凭据表单注入:确认成功(JS 返回 filled / already-filled)后才推进到
+        // .fillingCredentials;no-login-field → 保持 .githubLoginForm 并重试
+        if js.contains("login_field") {
+            injectCredentials(js: js, attempt: 0)
+            return
+        }
+        // 内联 2FA 探测:结果由 handleOTPProbeResult 解释(命中 → 填码提交;
+        // 未命中 → 登录页转手动,其他页面按现有规则继续)
+        if decision.isOTPProbe {
+            injectOTPProbe(js: js, url: url)
+            return
+        }
+        // 其余注入(授权点击 / two-factor 页 OTP / 读 cookie):一次性注入,结果不解释
+        injectOneShot(js: js)
+    }
+
+    // MARK: - 注入执行
+
+    /// 一次性注入:didFinish 后延时 300ms(防表单尚未渲染),结果不解释
+    @MainActor
+    private func injectOneShot(js: String) {
+        guard let wv = webView else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            wv.evaluateJavaScript(js) { _, error in
+                if let error {
+                    NSLog("GitHubLogin: JS 注入失败: %@", error.localizedDescription)
                 }
             }
         }
-        // 已注入凭据后进入「提交中」状态,供 decide 识别提交结果
-        if decision.step == .githubLoginForm,
-           js.contains("login_field") {
-            currentStep = .fillingCredentials
+    }
+
+    /// 凭据表单注入(带重试,修复「注入前推进状态导致卡死」):
+    /// 首次 didFinish 后 300ms 注入;JS 返回 filled / already-filled → 推进 .fillingCredentials;
+    /// no-login-field / no-form / JS 错误 → 保持 .githubLoginForm,间隔 500ms 重试,
+    /// 最多 credentialInjectMaxRetries 次重试;耗尽 → needsManualIntervention。
+    /// 5 分钟总超时仍由 restartTimeout 兜底;新决策到达时由 handleNavigation 取消本轮注入。
+    @MainActor
+    private func injectCredentials(js: String, attempt: Int) {
+        guard !succeeded, let wv = webView else { return }
+        injectionTask?.cancel()
+        let delayMs = attempt == 0 ? 300 : GitHubLoginService.credentialInjectRetryDelayMs
+        injectionTask = Task { @MainActor [self] in
+            try? await Task.sleep(for: .milliseconds(delayMs))
+            guard !Task.isCancelled, !self.succeeded else { return }
+            wv.evaluateJavaScript(js) { value, error in
+                if let error {
+                    NSLog("GitHubLogin: 凭据注入失败(将重试): %@", error.localizedDescription)
+                }
+                Task { @MainActor in
+                    self.handleCredentialInjectResult(value as? String, js: js, attempt: attempt)
+                }
+            }
         }
+    }
+
+    @MainActor
+    private func handleCredentialInjectResult(_ rawResult: String?, js: String, attempt: Int) {
+        guard !succeeded, currentStep == .githubLoginForm else { return }
+        switch GitHubLoginService.classifyCredentialInjectResult(rawResult) {
+        case .success:
+            // 确认注入成功后才推进状态(修复①:不再提前置位 .fillingCredentials)
+            isWaitingFormRender = false
+            currentStep = .fillingCredentials
+        case .retry:
+            guard attempt < GitHubLoginService.credentialInjectMaxRetries else {
+                // 5 次重试后仍无表单:转手动而不是死等 5 分钟超时
+                isWaitingFormRender = false
+                currentStep = .needsManualIntervention("页面未按预期渲染,请在窗口中手动登录")
+                return
+            }
+            isWaitingFormRender = true
+            injectCredentials(js: js, attempt: attempt + 1)
+        }
+    }
+
+    /// 内联 2FA 探测注入:github.com 任意页面、凭据已提交后执行一次(不依赖 URL 路径),
+    /// 命中 #otp 等选择器 → 自动填码提交;结果由 handleOTPProbeResult 解释
+    @MainActor
+    private func injectOTPProbe(js: String, url: URL?) {
+        guard !succeeded, let wv = webView else { return }
+        injectionTask?.cancel()
+        injectionTask = Task { @MainActor [self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, !self.succeeded else { return }
+            wv.evaluateJavaScript(js) { value, error in
+                if let error {
+                    NSLog("GitHubLogin: 内联 2FA 探测注入失败: %@", error.localizedDescription)
+                }
+                Task { @MainActor in
+                    self.handleOTPProbeResult(value as? String, url: url)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func handleOTPProbeResult(_ rawResult: String?, url: URL?) {
+        guard !succeeded else { return }
+        switch GitHubLoginService.classifyOTPProbeResult(rawResult) {
+        case .filled:
+            // 已填码并提交 → 进入等待 2FA 结果阶段
+            currentStep = .twoFactor
+        case .notPresent:
+            // 未命中:URL 是登录/会话页且凭据已提交 → 无内联 2FA = 登录未成功 → 转手动;
+            // 其他 github 页面 → 按现有规则继续(不打断)
+            let path = url?.path.lowercased() ?? ""
+            if path.contains("/login") || path.contains("/session") {
+                currentStep = .needsManualIntervention("GitHub 登录未成功,请在窗口中手动登录")
+            }
+        }
+    }
+
+    /// 取消在途注入(新决策 / onDisappear)
+    private func cancelPendingInjection() {
+        injectionTask?.cancel()
+        injectionTask = nil
+        isWaitingFormRender = false
     }
 
     /// 每次决策时取当前可用验证码:TOTP 每次现算(30s 滚动),一次性码用已保存值
