@@ -91,44 +91,82 @@ struct KeychainHelper: KeychainStoring {
 
     // MARK: - 免提示访问 ACL
 
-    /// 仅本 app 可访问的 Keychain 访问控制(免弹授权窗):以「当前可执行文件路径」
-    /// 作为可信应用(路径匹配,不依赖易变的 ad-hoc 签名身份 —— 重签名/重建后
-    /// 「始终允许」仍有效)。路径取不到/创建失败 → 返回 nil,调用方降级为系统默认
-    /// ACL(每次询问),保证能写入优先。
+    /// 候选可执行路径:当前运行路径 + /Applications 安装路径(dmg 安装后 ACL 仍匹配)。
+    /// 路径匹配而非签名身份(ad-hoc 重签名/重建后「始终允许」仍有效);多路径同时
+    /// 覆盖 dev 运行与 /Applications 安装版。
+    static func trustedExecutablePaths() -> [String] {
+        var paths = [String]()
+        if let cur = Bundle.main.executablePath { paths.append(cur) }
+        let apps = "/Applications/OpenCodeGo.app/Contents/MacOS/OpenCodeGo"
+        if !paths.contains(apps) { paths.append(apps) }
+        return paths
+    }
+
+    /// 仅本 app 可访问的 Keychain 访问控制(免弹授权窗):把 trustedExecutablePaths()
+    /// 中每个候选路径都作为可信应用 —— 经 dmg 安装到 /Applications 后,ACL 里的
+    /// 项与当前运行路径同属候选列表,免提示访问仍匹配。单项创建失败 → 跳过;
+    /// 全部失败 → 返回 nil,调用方降级为系统默认 ACL(每次询问),保证能写入优先。
     static func selfAccess() -> SecAccess? {
-        guard let path = Bundle.main.executablePath else { return nil }
-        var app: SecTrustedApplication?
-        guard SecTrustedApplicationCreateFromPath(path, &app) == errSecSuccess,
-              let app else { return nil }
+        var trustedApps: [SecTrustedApplication] = []
+        for path in trustedExecutablePaths() {
+            var app: SecTrustedApplication?
+            guard SecTrustedApplicationCreateFromPath(path, &app) == errSecSuccess,
+                  let app else { continue }
+            trustedApps.append(app)
+        }
+        guard !trustedApps.isEmpty else { return nil }
         var access: SecAccess?
         let desc = "OpenCodeGo 自身免提示访问" as CFString
-        guard SecAccessCreate(desc, [app] as CFArray, &access) == errSecSuccess else { return nil }
+        guard SecAccessCreate(desc, trustedApps as CFArray, &access) == errSecSuccess else { return nil }
         return access
     }
 
     // MARK: - 既有项免提示访问迁移(启动时一次性)
 
-    /// 完成标记前缀(按 service 存 UserDefaults):置位表示该 service 的既有项已
-    /// 重建为免提示 ACL,无需再迁移;迁移有失败时不置位,下次启动重试。
+    /// 完成标记前缀(按 service 存 UserDefaults):键为 `keychain.selfAccess.migrationDone.<service>`,
+    /// 值不再是 Bool,而是「迁移时的可执行路径列表指纹」。路径变化(如 dev 运行 →
+    /// /Applications 安装)后标记与当前指纹不一致,启动时重新迁移,保证新路径的
+    /// ACL 项也覆盖;b17 遗留的 Bool 标记(如 "1"/"true")与指纹必然不等,同样
+    /// 触发一次重迁移后覆盖为指纹。迁移有失败时不更新标记,下次启动重试。
     private static let migrationDoneFlagPrefix = "keychain.selfAccess.migrationDone"
 
     private static func migrationDoneFlag(for service: String) -> String {
         "\(migrationDoneFlagPrefix).\(service)"
     }
 
+    /// 当前可执行路径列表指纹(存 UserDefaults;与 trustedExecutablePaths() 同构,
+    /// 顺序固定,join 分隔符不会出现在路径中)
+    static func currentMigrationFingerprint() -> String {
+        trustedExecutablePaths().joined(separator: "|")
+    }
+
+    /// 迁移判定(纯函数,可测):已存指纹 ≠ 当前指纹(含未存/旧版 Bool 标记)→
+    /// 需要迁移。一致 → 不需要。
+    static func migrationNeeded(storedFingerprint: String?, currentFingerprint: String) -> Bool {
+        storedFingerprint != currentFingerprint
+    }
+
     /// 启动时一次性迁移:对 service 下指定 key 的既有项执行「读出 → 删除 → 重建」,
     /// 使重建项携带「仅本 app 免提示访问」ACL。
-    /// - 完成标记已置位 → 直接返回(幂等);
-    /// - 全部成功 → 置位标记(此后不再重建;之后新建的项在 set 时自动带新 ACL);
-    /// - 存在失败 → 记日志且不置位标记,下次启动重试。
+    /// - 完成标记指纹与当前路径指纹一致 → 直接返回(幂等);
+    /// - 不一致(未置位/Bool 遗留/路径变化)→ 迁移;全部成功 → 覆盖标记为当前指纹;
+    /// - 存在失败 → 记日志且不更新标记,下次启动重试。
     /// 调用方须在后台任务(Task.detached)中调用,不阻塞 UI;仅真实 Keychain 下由
-    /// Store init 调度,测试/内存 mock 不经过此路径。
-    static func runSelfAccessMigration(service: String, keys: [String]) {
+    /// Store init 调度,测试注入内存 mock + 独立 defaults,不经过真实存储。
+    static func runSelfAccessMigration(
+        service: String,
+        keys: [String],
+        keychain: KeychainStoring? = nil,
+        defaults: UserDefaults = .standard
+    ) {
         let flag = migrationDoneFlag(for: service)
-        guard !UserDefaults.standard.bool(forKey: flag) else { return }
-        let failed = KeychainHelper(service: service).migrateKeysToSelfAccess(keys)
+        let current = currentMigrationFingerprint()
+        guard migrationNeeded(
+            storedFingerprint: defaults.string(forKey: flag),
+            currentFingerprint: current) else { return }
+        let failed = (keychain ?? KeychainHelper(service: service)).migrateKeysToSelfAccess(keys)
         if failed.isEmpty {
-            UserDefaults.standard.set(true, forKey: flag)
+            defaults.set(current, forKey: flag)
         } else {
             logger.warning("Keychain 免提示 ACL 迁移失败 \(failed.count) 项(\(failed.joined(separator: ","), privacy: .public)),下次启动重试")
         }

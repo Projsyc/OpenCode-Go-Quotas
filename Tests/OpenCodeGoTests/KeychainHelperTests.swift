@@ -24,6 +24,16 @@ private final class FlakyKeychain: KeychainStoring {
     func delete(_ key: String) { storage[key] = nil }
 }
 
+/// 计数版内存 Keychain:统计 delete 调用,验证「指纹一致时不再迁移(不删除重建)」
+private final class CountingKeychain: KeychainStoring {
+    private(set) var storage: [String: String] = [:]
+    private(set) var deleteCount = 0
+
+    func set(_ value: String, forKey key: String) throws { storage[key] = value }
+    func get(_ key: String) -> String? { storage[key] }
+    func delete(_ key: String) { storage[key] = nil; deleteCount += 1 }
+}
+
 final class KeychainHelperTests: XCTestCase {
 
     /// 真实环境 Bundle.main.executablePath 存在 → selfAccess() 应能创建出访问控制对象
@@ -72,5 +82,96 @@ final class KeychainHelperTests: XCTestCase {
 
         XCTAssertEqual(failed, ["k4"])
         XCTAssertNil(kc.get("k4"), "重建失败后项已删除(失败已上报,等待下次迁移重试)")
+    }
+
+    // MARK: - 免提示 ACL 候选路径(b19:dmg 安装后路径变化,ACL 仍匹配)
+
+    /// 候选路径必须同时包含当前运行路径与 /Applications 安装路径,且无重复
+    func testTrustedExecutablePathsContainsCurrentAndInstallPaths() {
+        let paths = KeychainHelper.trustedExecutablePaths()
+        if let current = Bundle.main.executablePath {
+            XCTAssertTrue(
+                paths.contains(current), "候选路径应包含当前运行路径(dev 运行)")
+        }
+        XCTAssertTrue(
+            paths.contains("/Applications/OpenCodeGo.app/Contents/MacOS/OpenCodeGo"),
+            "候选路径应包含 /Applications 安装路径(dmg 安装版)")
+        XCTAssertEqual(paths.count, Set(paths).count, "候选路径不应重复")
+    }
+
+    /// 非空(测试宿主可执行路径必然存在,不会返回空列表)
+    func testTrustedExecutablePathsNotEmpty() {
+        XCTAssertFalse(KeychainHelper.trustedExecutablePaths().isEmpty)
+    }
+
+    /// 当前指纹 = 候选路径 join,定义同构
+    func testCurrentMigrationFingerprintMatchesTrustedPaths() {
+        XCTAssertEqual(
+            KeychainHelper.currentMigrationFingerprint(),
+            KeychainHelper.trustedExecutablePaths().joined(separator: "|"))
+    }
+
+    // MARK: - 迁移标记路径指纹(b19:路径变化 → 重新迁移)
+
+    /// 指纹判定:一致 → 不需要迁移;不一致(Bool 遗留/未存/路径变化)→ 需要迁移
+    func testMigrationNeededComparesFingerprints() {
+        let current = KeychainHelper.currentMigrationFingerprint()
+        XCTAssertFalse(
+            KeychainHelper.migrationNeeded(
+                storedFingerprint: current, currentFingerprint: current),
+            "指纹一致 → 不需迁移")
+        XCTAssertTrue(
+            KeychainHelper.migrationNeeded(
+                storedFingerprint: nil, currentFingerprint: current),
+            "无标记(首次)→ 需要迁移")
+        XCTAssertTrue(
+            KeychainHelper.migrationNeeded(
+                storedFingerprint: "true", currentFingerprint: current),
+            "b17 Bool 遗留标记(值非指纹)→ 需要迁移")
+        XCTAssertTrue(
+            KeychainHelper.migrationNeeded(
+                storedFingerprint: current + "|/tmp/dev-build/OpenCodeGo",
+                currentFingerprint: current),
+            "路径变化(dev 构建 → 安装版)→ 需要迁移")
+    }
+
+    /// 启动迁移全流程(注入内存 keychain + 独立 defaults,不碰真实 Keychain/UserDefaults):
+    /// 首次(无标记)→ 迁移并写入当前指纹;指纹一致 → 不再删除重建;指纹不一致
+    /// (模拟路径变化)→ 重新迁移并更新指纹。值全程保持不变。
+    func testRunSelfAccessMigrationFingerprintLifecycle() throws {
+        let suite = "test.keychain.migration.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)
+        defer { defaults?.removePersistentDomain(forName: suite) }
+        let kc = CountingKeychain()
+        let key = "11111111-1111-1111-1111-111111111111"
+        try kc.set("cookie-migration", forKey: key)
+        let service = "test-service"
+        let flag = "keychain.selfAccess.migrationDone.\(service)"
+
+        // 1. 首次:无标记 → 迁移,值不变,写入当前路径指纹
+        KeychainHelper.runSelfAccessMigration(
+            service: service, keys: [key], keychain: kc, defaults: defaults!)
+        XCTAssertEqual(kc.get(key), "cookie-migration", "迁移必须保留值")
+        XCTAssertEqual(kc.deleteCount, 1, "首次迁移应删除重建一次")
+        XCTAssertEqual(
+            defaults?.string(forKey: flag),
+            KeychainHelper.currentMigrationFingerprint(),
+            "成功后应写入当前路径指纹")
+
+        // 2. 指纹一致 → 直接返回,不再删除重建
+        KeychainHelper.runSelfAccessMigration(
+            service: service, keys: [key], keychain: kc, defaults: defaults!)
+        XCTAssertEqual(kc.deleteCount, 1, "指纹一致时不应重复迁移")
+
+        // 3. 指纹不一致(模拟路径变化,如 dev → /Applications 安装)→ 重新迁移并更新指纹
+        defaults?.set("some/dev/path|/Applications/OpenCodeGo.app/Contents/MacOS/OpenCodeGo", forKey: flag)
+        KeychainHelper.runSelfAccessMigration(
+            service: service, keys: [key], keychain: kc, defaults: defaults!)
+        XCTAssertEqual(kc.deleteCount, 2, "路径变化应重新迁移")
+        XCTAssertEqual(kc.get(key), "cookie-migration", "重迁移仍须保留值")
+        XCTAssertEqual(
+            defaults?.string(forKey: flag),
+            KeychainHelper.currentMigrationFingerprint(),
+            "重迁移后指纹更新为当前路径")
     }
 }
