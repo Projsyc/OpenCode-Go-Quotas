@@ -40,6 +40,8 @@ struct GitHubLoginView: View {
     @State private var lastDecision: GitHubLoginDecision?
     @State private var lastDecidedURL: URL?
     @State private var lastExecutedJS: (step: GitHubLoginStep, js: String)?
+    /// 捕获成功标志;兼作「流程已终止」标记(成功 / 超时 / 取消置位):
+    /// 置位后残留的导航 / 轮询 / 注入结果回调一律不再推进状态或触发 onAuthCookie
     @State private var succeeded = false
     @State private var pollTimer: Timer?
     @State private var timeoutTask: Task<Void, Never>?
@@ -198,6 +200,20 @@ struct GitHubLoginView: View {
 
     @MainActor
     private func start() {
+        // 幂等复位:onAppear 通常伴随新实例(@State 即初值),但同一视图被再次呈现
+        // 时 @State 可能保留上次流程的步骤 / 轮询 / 时间线(重开 sheet 残留场景),
+        // 这里统一清空,保证每次流程都从干净状态开始(全部置位为初值,幂等安全)。
+        succeeded = false
+        reachedGitHubOAuth = false
+        currentStep = .idle
+        lastDecision = nil
+        lastDecidedURL = nil
+        lastExecutedJS = nil
+        isWaitingFormRender = false
+        cancelPendingInjection()
+        stopPolling()
+        stopTimeout()
+        flowLog.clear()
         flowLog.log("flow start")
         flowLogDumped = false
         oneTimeCodeExpiryReported = false
@@ -256,7 +272,7 @@ struct GitHubLoginView: View {
         guard !succeeded else { return }
         // 门槛:到达过 github.com(含子域)才允许把 auth cookie 判定为登录成功;
         // 未到达前的 Fe26. cookie 是 opencode 对匿名访问下发的占位,轮询时必须忽略(见 pollCookies)
-        if isGitHubHost(url) {
+        if GitHubLoginService.isGitHubHost(url) {
             reachedGitHubOAuth = true
         }
         let previousStep = currentStep
@@ -279,7 +295,10 @@ struct GitHubLoginView: View {
 
         if decision.step != currentStep {
             currentStep = decision.step
-            restartTimeout()
+            // 步骤变化 → 重启 300s 无进展超时(终态除外,decide 不产生终态)
+            if GitHubLoginService.shouldRestartTimeout(oldStep: previousStep, newStep: decision.step) {
+                restartTimeout()
+            }
         }
         if decision.pollCookie {
             startPolling()
@@ -309,19 +328,18 @@ struct GitHubLoginView: View {
         injectOneShot(js: js)
     }
 
-    /// URL host 是否为 github.com 或其子域(与 GitHubLoginService.decide 内部判断一致)
-    private func isGitHubHost(_ url: URL?) -> Bool {
-        guard let host = url?.host?.lowercased() else { return false }
-        return host == "github.com" || host.hasSuffix(".github.com")
-    }
-
     // MARK: - 注入执行
 
-    /// 一次性注入:didFinish 后延时 300ms(防表单尚未渲染),结果不解释
+    /// 一次性注入:didFinish 后延时 300ms(防表单尚未渲染),结果不解释。
+    /// 与凭据 / OTP 注入共用 injectionTask:新决策到达时被取消,避免 300ms 窗口内
+    /// 页面已离场还在旧上下文执行;执行前再校验流程未终止、WebView 未被替换。
     @MainActor
     private func injectOneShot(js: String) {
-        guard let wv = webView else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        guard !succeeded, let wv = webView else { return }
+        injectionTask?.cancel()
+        injectionTask = Task { @MainActor [self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, !self.succeeded, self.webView === wv else { return }
             wv.evaluateJavaScript(js) { _, error in
                 if let error {
                     NSLog("GitHubLogin: JS 注入失败: %@", error.localizedDescription)
@@ -363,6 +381,8 @@ struct GitHubLoginView: View {
             flowLog.log("inject: \(rawResult ?? "js-error") -> success")
             isWaitingFormRender = false
             currentStep = .fillingCredentials
+            // 步骤推进 → 重启 300s 无进展超时(与导航决策的步骤变化一致)
+            restartTimeout()
         case .retry:
             guard attempt < GitHubLoginService.credentialInjectMaxRetries else {
                 // 5 次重试后仍无表单:转手动而不是死等 5 分钟超时
@@ -370,6 +390,8 @@ struct GitHubLoginView: View {
                 dumpFlowLog()
                 isWaitingFormRender = false
                 currentStep = .needsManualIntervention("页面未按预期渲染,请在窗口中手动登录")
+                // 转手动后超时重新起算,用户手动登录期间不被上一次导航起的计时器打断
+                restartTimeout()
                 return
             }
             flowLog.log("inject: \(rawResult ?? "js-error") -> retry(\(attempt + 1)/\(GitHubLoginService.credentialInjectMaxRetries))")
@@ -400,12 +422,18 @@ struct GitHubLoginView: View {
 
     @MainActor
     private func handleOTPProbeResult(_ rawResult: String?, url: URL?) {
-        guard !succeeded else { return }
+        // 竞态守卫:探测只在 .fillingCredentials / .twoFactor 阶段注入;结果到达时
+        // 若状态已推进(新导航 / 转手动 / 回跳 opencode),该结果已过期——丢弃,
+        // 避免把新状态覆盖回 .twoFactor 或误判「登录未成功」
+        // (触发路径:探测 300ms 窗口内页面继续导航)
+        guard !succeeded, GitHubLoginService.isCredentialSubmittedState(currentStep) else { return }
         switch GitHubLoginService.classifyOTPProbeResult(rawResult) {
         case .filled:
             // 已填码并提交 → 进入等待 2FA 结果阶段
             flowLog.log("otp-probe: \(rawResult ?? "js-error") -> filled")
             currentStep = .twoFactor
+            // 步骤推进 → 重启 300s 无进展超时
+            restartTimeout()
         case .notPresent:
             flowLog.log("otp-probe: \(rawResult ?? "js-error") -> notPresent")
             // 未命中:URL 是登录/会话页且凭据已提交 → 无内联 2FA = 登录未成功 → 转手动;
@@ -415,6 +443,8 @@ struct GitHubLoginView: View {
                 flowLog.log("otp-probe: 登录页无内联 OTP -> 转手动")
                 dumpFlowLog()
                 currentStep = .needsManualIntervention("GitHub 登录未成功,请在窗口中手动登录")
+                // 转手动后超时重新起算,用户手动补登录期间不被旧计时器打断
+                restartTimeout()
             }
         }
     }
@@ -513,7 +543,13 @@ struct GitHubLoginView: View {
 
     @MainActor
     private func cancel() {
-        guard !succeeded else { return }
+        // succeeded 兼作「流程已终止」标记(成功 / 超时 / 取消三条路径置位):
+        // 置位后残留的导航回调 / 轮询回调 / 注入结果一律不再推进状态或触发
+        // onAuthCookie——触发路径:取消瞬间恰有 getAllCookies 回调在途(500ms 轮询
+        // 间隙内点击取消命中概率高),此前会先触发成功回调再取消,父视图被回填。
+        // 但 .done(成功,1s 后自动关闭)期间点取消保持 no-op;超时失败后点取消仍要收尾关闭。
+        if succeeded, case .done = currentStep { return }
+        succeeded = true
         stopPolling()
         stopTimeout()
         flowLog.log("cancelled")
@@ -530,6 +566,9 @@ struct GitHubLoginView: View {
             try? await Task.sleep(for: Self.loginTimeout)
             guard !Task.isCancelled, !succeeded else { return }
             stopPolling()
+            // 终止标记:超时后残留的轮询 / 导航回调不得再触发成功回调
+            // (把 .failed 覆盖为 .waitingOAuthRedirect 等)或 onAuthCookie
+            succeeded = true
             flowLog.log("timeout: 300s 无进展")
             dumpFlowLog()
             wipeStore()

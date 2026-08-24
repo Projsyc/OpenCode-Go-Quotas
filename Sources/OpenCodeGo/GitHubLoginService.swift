@@ -147,6 +147,15 @@ struct GitHubLoginService {
         totpCode: String?,
         state: GitHubLoginStep
     ) -> GitHubLoginDecision {
+        // 终态硬守卫:.done / .failed 只由视图的成功 / 超时路径置入;成功或超时后
+        // 残留的导航回调(didFinish 迟到等)不得把终态改写回进行中步骤,也不得
+        // 重新启动轮询或注入(触发路径:超时后 opencode 页才完成加载)。
+        if case .done = state {
+            return GitHubLoginDecision(step: state, javascript: nil, pollCookie: false)
+        }
+        if case .failed = state {
+            return GitHubLoginDecision(step: state, javascript: nil, pollCookie: false)
+        }
         guard let url else {
             // 无 URL(首次加载前):进入加载中
             let step: GitHubLoginStep = (state == .idle) ? .loadingLoginPage : state
@@ -217,7 +226,7 @@ struct GitHubLoginService {
             // 5) 其他 GitHub 页面(资料页、安全页等):按当前状态延续;
             //    凭据已提交后(等内联 2FA)追加一次 OTP 探测,不依赖 URL 路径:
             //    命中 → 自动填码提交,未命中由视图按现有规则继续
-            if (state == .fillingCredentials || state == .twoFactor),
+            if isCredentialSubmittedState(state),
                let totpCode, !totpCode.isEmpty {
                 return GitHubLoginDecision(
                     step: state,
@@ -241,6 +250,37 @@ struct GitHubLoginService {
             return GitHubLoginDecision(step: .loadingLoginPage, javascript: nil, pollCookie: false)
         }
         return GitHubLoginDecision(step: state, javascript: nil, pollCookie: false)
+    }
+
+    // MARK: - 域名 / 流程阶段判定(decide 与视图共用,避免两处判定漂移)
+
+    /// URL 是否为 github.com 或其子域(OAuth 门槛 reachedGitHubOAuth 的判定,
+    /// 与 decide 内部 isGitHubHost 规则一致,视图侧不再各写一份);nil → false。
+    static func isGitHubHost(_ url: URL?) -> Bool {
+        guard let host = url?.host?.lowercased() else { return false }
+        return host == "github.com" || host.hasSuffix(".github.com")
+    }
+
+    /// 凭据已提交、等待登录结果的阶段(内联 OTP 探测的注入前提):
+    /// decide 仅在该阶段对 github.com 任意页面追加探测;视图侧探测结果也只在
+    /// 该阶段应用——结果到达时若状态已推进,该结果过期,丢弃。
+    static func isCredentialSubmittedState(_ state: GitHubLoginStep) -> Bool {
+        state == .fillingCredentials || state == .twoFactor
+    }
+
+    // MARK: - 超时重启判定(「步骤变化才重启 300s 无进展超时」)
+
+    /// 步骤变化 → 重启 300s 无进展超时;同步骤(无进展)不重启;终态(.done / .failed)
+    /// 不重启——.done 由成功路径自行 stopTimeout,.failed 自身即超时终态,重启计时器
+    /// 会在终态上再触发一次(无害但多余),且终态后不应再有新计时器在途。
+    /// 触发路径:凭据注入结果 / OTP 探测结果推进步骤时同样调用(此前只在导航决策
+    /// 的步骤变化时重启,用户手动登录期间可能被上一次导航的计时器打断)。
+    static func shouldRestartTimeout(oldStep: GitHubLoginStep, newStep: GitHubLoginStep) -> Bool {
+        guard oldStep != newStep else { return false }
+        switch newStep {
+        case .done, .failed: return false
+        default: return true
+        }
     }
 
     // MARK: - 一次性验证码过期判定

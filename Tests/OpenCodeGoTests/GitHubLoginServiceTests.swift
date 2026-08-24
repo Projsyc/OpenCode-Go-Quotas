@@ -668,6 +668,93 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertFalse(doneLine.contains("Fe26"))
     }
 
+    // MARK: - isGitHubHost / isCredentialSubmittedState(域名与流程阶段判定,视图共用)
+
+    /// 视图侧 OAuth 门槛(reachedGitHubOAuth)与 decide 内部判定共用此函数;
+    /// 重点:判空(nil → false)与伪装域名不得命中
+    func testIsGitHubHost() {
+        XCTAssertFalse(GitHubLoginService.isGitHubHost(nil), "nil URL 判空返回 false")
+        XCTAssertTrue(GitHubLoginService.isGitHubHost(url("https://github.com/login")), "根域命中")
+        XCTAssertTrue(GitHubLoginService.isGitHubHost(url("https://api.github.com/sessions")), "子域命中")
+        XCTAssertTrue(GitHubLoginService.isGitHubHost(url("https://GitHub.com/foo")), "host 大小写不敏感")
+        XCTAssertFalse(GitHubLoginService.isGitHubHost(url("https://notgithub.com/login")), "前缀伪装不得命中")
+        XCTAssertFalse(GitHubLoginService.isGitHubHost(url("https://github.com.evil.com/login")), "后缀伪装不得命中")
+        XCTAssertFalse(GitHubLoginService.isGitHubHost(url("https://opencode.ai")), "opencode 域不命中")
+        XCTAssertFalse(GitHubLoginService.isGitHubHost(url("https://opencode.ai.attacker.com")))
+    }
+
+    /// 内联 OTP 探测的注入前提:仅凭据已提交阶段(含终态在内其余一律 false),
+    /// 视图也据此丢弃过期探测结果(竞态守卫)
+    func testIsCredentialSubmittedState() {
+        XCTAssertTrue(GitHubLoginService.isCredentialSubmittedState(.fillingCredentials))
+        XCTAssertTrue(GitHubLoginService.isCredentialSubmittedState(.twoFactor))
+        for state in [GitHubLoginStep.idle, .loadingLoginPage, .githubLoginForm,
+                      .waitingOAuthRedirect, .needsManualIntervention("请手动完成")] {
+            XCTAssertFalse(GitHubLoginService.isCredentialSubmittedState(state))
+        }
+        XCTAssertFalse(GitHubLoginService.isCredentialSubmittedState(.done(authCookie: "x")), "终态不是探测前提")
+        XCTAssertFalse(GitHubLoginService.isCredentialSubmittedState(.failed("x")))
+    }
+
+    // MARK: - shouldRestartTimeout(「步骤变化才重启 300s 无进展超时」判定)
+
+    /// 任何非终态步骤变化(含注入结果 / 探测结果推进)都重启超时;
+    /// 转手动也重启——否则用户手动登录期间被上一次导航起的计时器打断
+    func testShouldRestartTimeoutOnNonTerminalStepChange() {
+        XCTAssertTrue(GitHubLoginService.shouldRestartTimeout(
+            oldStep: .githubLoginForm, newStep: .fillingCredentials))
+        XCTAssertTrue(GitHubLoginService.shouldRestartTimeout(
+            oldStep: .githubLoginForm, newStep: .twoFactor))
+        XCTAssertTrue(GitHubLoginService.shouldRestartTimeout(
+            oldStep: .fillingCredentials, newStep: .needsManualIntervention("请手动完成")),
+            "转手动也要重启计时")
+        XCTAssertTrue(GitHubLoginService.shouldRestartTimeout(
+            oldStep: .twoFactor, newStep: .waitingOAuthRedirect))
+    }
+
+    /// 同步骤(无进展)不重置 5 分钟计时:重试注入等原地等待不无限续命
+    func testShouldRestartTimeoutSameStepDoesNotRestart() {
+        for step in [GitHubLoginStep.githubLoginForm, .waitingOAuthRedirect,
+                     .fillingCredentials, .twoFactor] {
+            XCTAssertFalse(GitHubLoginService.shouldRestartTimeout(oldStep: step, newStep: step))
+        }
+    }
+
+    /// 终态(.done / .failed)不重启:.done 由成功路径自行 stopTimeout;
+    /// .failed 自身即超时终态,重启计时器会在终态上再触发一次(多余)
+    func testShouldRestartTimeoutTerminalStepsDoNotRestart() {
+        XCTAssertFalse(GitHubLoginService.shouldRestartTimeout(
+            oldStep: .twoFactor, newStep: .done(authCookie: "x")))
+        XCTAssertFalse(GitHubLoginService.shouldRestartTimeout(
+            oldStep: .twoFactor, newStep: .failed("登录超时")))
+    }
+
+    // MARK: - decide:终态不被导航决定推翻(审计:终态残留)
+
+    /// 终态(.done / .failed)只由视图的成功 / 超时路径置入;decide 对任何 URL
+    /// (含 opencode 域)都必须原样保留终态:不注入、不轮询、不改写回进行中步骤
+    /// (触发路径:超时后 opencode 页才完成加载,残留 didFinish 曾把 .failed
+    /// 覆盖为 .waitingOAuthRedirect 并重启轮询)
+    func testDecideNeverOverridesTerminalStates() {
+        for state in [GitHubLoginStep.done(authCookie: "x"), .failed("登录超时")] {
+            let d = GitHubLoginService.decide(
+                for: url("https://opencode.ai/workspace/wrk_abc123"),
+                githubUsername: "u", githubPassword: "p",
+                totpCode: nil, state: state)
+            XCTAssertEqual(d.step, state, "终态必须原样保留")
+            XCTAssertFalse(d.pollCookie, "终态不得重新启动轮询")
+            XCTAssertNil(d.javascript, "终态不得注入 JS")
+
+            let onLogin = GitHubLoginService.decide(
+                for: url("https://github.com/login"),
+                githubUsername: "u", githubPassword: "p",
+                totpCode: "123456", state: state)
+            XCTAssertEqual(onLogin.step, state, "GitHub 页同样不得推翻终态")
+            XCTAssertNil(onLogin.javascript)
+            XCTAssertFalse(onLogin.pollCookie)
+        }
+    }
+
     // MARK: - 辅助
 
     private func makeCookie(name: String, value: String, domain: String) -> HTTPCookie {
