@@ -289,7 +289,7 @@ struct GitHubImportView: View {
     /// 将导入文本逐行解析为预览行:有效行携带解析结果(供导入),错误行携带原因;
     /// 空行/注释行跳过。按行拆分与「空行/注释跳过」判定统一走 `GitHubImportParser.parseRow`。
     static func previewRows(from text: String) -> [GitHubImportPreviewRow] {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = GitHubImportParser.splitLines(text)
         var rows: [GitHubImportPreviewRow] = []
         for (index, raw) in lines.enumerated() {
             let lineNumber = index + 1

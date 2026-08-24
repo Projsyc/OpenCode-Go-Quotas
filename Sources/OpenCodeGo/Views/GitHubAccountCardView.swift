@@ -13,6 +13,9 @@ struct GitHubAccountCardView: View {
     @State private var secret: String?
     /// 剪贴板延迟清理任务(复制后 45s 清除;新复制或视图消失时取消)
     @State private var clipboardCleanupTask: Task<Void, Never>?
+    /// 「已复制」指示器回落任务(1.5s 后清空;再次复制时取消旧的,避免旧任务
+    /// 先醒来把新一次复制的指示提前清掉)
+    @State private var copiedResetTask: Task<Void, Never>?
 
     private enum CopiedTarget { case code, password }
 
@@ -49,7 +52,10 @@ struct GitHubAccountCardView: View {
         .task(id: account.updatedAt) {
             secret = store.credential(for: account)
         }
-        .onDisappear { clipboardCleanupTask?.cancel() }
+        .onDisappear {
+            clipboardCleanupTask?.cancel()
+            copiedResetTask?.cancel()
+        }
         .sheet(isPresented: $showingEdit) { GitHubEditView(account: account) }
         .confirmationDialog(
             "删除 GitHub 账号「\(account.username)」?将同时删除本机保存的密码与验证码凭据。",
@@ -160,20 +166,30 @@ struct GitHubAccountCardView: View {
 
     // MARK: - 一次性验证码状态行
 
+    /// 一次性验证码状态行。过期判定按 TimelineView 周期驱动(context.date),
+    /// 不再是一次性渲染:否则状态静止(悬停等重渲染才翻转),用户看到的
+    /// 「60 秒后失效」永远不会到期。
     private func oneTimeCodeStatus(_ account: GitHubAccount) -> some View {
-        let expired = account.lastCodeAt.map { Date().timeIntervalSince($0) >= 60 } ?? true
-        return HStack(spacing: 8) {
-            Image(systemName: expired ? "clock.badge.xmark" : "clock")
-                .font(.callout)
-                .foregroundStyle(expired ? Color.gray.opacity(0.45) : Color.orange)
-            Text(expired ? "已失效" : "验证码 60 秒后失效")
-                .font(.callout)
-                .foregroundStyle(expired ? .tertiary : .secondary)
-            Spacer()
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let expired = Self.isOneTimeCodeExpired(account, at: context.date)
+            HStack(spacing: 8) {
+                Image(systemName: expired ? "clock.badge.xmark" : "clock")
+                    .font(.callout)
+                    .foregroundStyle(expired ? Color.gray.opacity(0.45) : Color.orange)
+                Text(expired ? "已失效" : "验证码 60 秒后失效")
+                    .font(.callout)
+                    .foregroundStyle(expired ? .tertiary : .secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.orange.opacity(0.06)))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.orange.opacity(0.06)))
+    }
+
+    /// 一次性验证码 60 秒有效期判定(纯函数,可单测);无记录时间视为已过期
+    static func isOneTimeCodeExpired(_ account: GitHubAccount, at date: Date = Date()) -> Bool {
+        account.lastCodeAt.map { date.timeIntervalSince($0) >= 60 } ?? true
     }
 
     // MARK: - 操作栏
@@ -247,8 +263,19 @@ struct GitHubAccountCardView: View {
         NSPasteboard.general.setString(value, forType: .string)
         withAnimation(.easeOut(duration: 0.15)) { copied = target }
         scheduleClipboardCleanup(value)
-        Task {
-            try? await Task.sleep(for: .seconds(1.5))
+        scheduleCopiedReset(target)
+    }
+
+    /// 复制指示器 1.5s 后回落;再次复制同 target 时取消旧任务 —— 否则旧任务
+    /// 先醒来会把新一次复制的「已复制」指示提前清掉(显示不足 0.5s)
+    private func scheduleCopiedReset(_ target: CopiedTarget) {
+        copiedResetTask?.cancel()
+        copiedResetTask = Task {
+            do {
+                try await Task.sleep(for: .seconds(1.5))
+            } catch {
+                return   // 被新复制或视图消失取消 → 不再改动状态
+            }
             if copied == target { copied = nil }
         }
     }
