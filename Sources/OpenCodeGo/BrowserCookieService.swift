@@ -109,13 +109,6 @@ struct BrowserCookieService {
         var value: String // 解密后的明文,仅存内存
 
         var id: String { "\(browser.rawValue)/\(profileName)/\(cookieName)" }
-
-        /// 对外的展示信息(不暴露 cookie 内容)
-        var summary: String {
-            let valid = value.hasPrefix("Fe26.") ? "✓" : "⚠"
-            let expiry = expiresAt.map { ISO8601DateFormatter().string(from: $0) } ?? "未知"
-            return "\(valid) \(browser.rawValue) · \(profileName) · \(value.count) 字符 · 过期 \(expiry)"
-        }
     }
 
     /// 在所有已安装浏览器、所有配置文件里找 opencode.ai 的 auth cookie

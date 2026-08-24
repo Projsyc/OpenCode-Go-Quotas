@@ -100,7 +100,7 @@ struct QuotaClient: Sendable {
         req.setValue("auth=\(cookie)", forHTTPHeaderField: "Cookie")
 
         let (data, response) = try await session.data(for: req)
-        let http = response as! HTTPURLResponse
+        guard let http = response as? HTTPURLResponse else { throw QuotaError.httpError(-1) }
 
         if http.statusCode == 401 || http.statusCode == 403 {
             throw QuotaError.authFailed
@@ -195,7 +195,7 @@ struct QuotaClient: Sendable {
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let (data, response) = try await session.data(for: req)
-        let http = response as! HTTPURLResponse
+        guard let http = response as? HTTPURLResponse else { throw QuotaError.httpError(-1) }
 
         if http.statusCode == 401 || http.statusCode == 403 {
             throw QuotaError.authFailed

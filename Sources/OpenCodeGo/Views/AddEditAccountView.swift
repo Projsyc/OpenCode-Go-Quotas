@@ -23,6 +23,8 @@ struct AddEditAccountView: View {
     @State private var candidates: [BrowserCookieService.Candidate] = []
     @State private var importMessage: String?
     @State private var importChecked = false
+    /// 首次出现时已自动扫描过一次;再次出现且未点「重新检测」则跳过自动扫描
+    @State private var autoScanned = false
     @State private var hoveredCandidate: String?
 
     // GitHub 账号自动登录
@@ -128,7 +130,11 @@ struct AddEditAccountView: View {
                 selectedGitHubAccountID = first.id
             }
         }
-        .task { await detect() }
+        .task {
+            guard !autoScanned else { return }
+            autoScanned = true
+            await detect()
+        }
         .onChange(of: githubStore.accounts) { _, accounts in
             if let sel = selectedGitHubAccountID, !accounts.contains(where: { $0.id == sel }) {
                 selectedGitHubAccountID = accounts.first?.id
@@ -313,12 +319,15 @@ struct AddEditAccountView: View {
         if candidates.isEmpty == false && !force { return }
         importChecked = false
         importMessage = nil
-        await Task.yield()
-        let all = BrowserCookieService.findOpenCodeAuthCookies()
-        candidates = all.filter { $0.browser == importBrowser }
+        let browser = importBrowser
+        // 扫描含 profile 枚举 + PBKDF2 解密,可能耗时;放后台执行避免卡主线程
+        let all = await Task.detached(priority: .userInitiated) {
+            BrowserCookieService.findOpenCodeAuthCookies()
+        }.value
+        candidates = all.filter { $0.browser == browser }
         importChecked = true
         if candidates.isEmpty {
-            importMessage = "没有在 \(importBrowser.rawValue) 中找到 opencode.ai 的 auth Cookie，可手动填写"
+            importMessage = "没有在 \(browser.rawValue) 中找到 opencode.ai 的 auth Cookie，可手动填写"
         }
     }
 

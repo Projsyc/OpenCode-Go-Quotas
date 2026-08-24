@@ -247,11 +247,16 @@ struct UsageHistoryView: View {
         }
     }
 
-    /// 费用:至少 2 位小数,超出部分去尾零(0.001230 → 0.00123)
+    /// 费用:至少 2 位小数,超出部分去尾零(0.001230 → 0.00123);
+    /// 固定 en_US 区域,避免 "US$12.00" / 小数点差异导致金额显示与测试不稳定
     static func fmtCost(_ cost: Double) -> String {
-        var s = cost.formatted(.currency(code: "USD").precision(.fractionLength(2...6)))
+        var s = cost.formatted(
+            .currency(code: "USD")
+            .locale(Locale(identifier: "en_US"))
+            .precision(.fractionLength(2...6)))
         guard let dot = s.firstIndex(of: ".") else { return s }
         let fracStart = s.index(after: dot)
+        // 保底 2 位小数:仅当小数位 ≥3 时才去尾零,确保 "$12.00" 不被削成 "$12.0"
         while s.distance(from: fracStart, to: s.endIndex) > 2, s.hasSuffix("0") {
             s.removeLast()
         }
