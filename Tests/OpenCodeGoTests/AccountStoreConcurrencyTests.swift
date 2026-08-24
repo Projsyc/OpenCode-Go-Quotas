@@ -572,4 +572,59 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         XCTAssertTrue(after.contains("\"A\""))
         XCTAssertTrue(after.contains("\"B\""))
     }
+
+    // MARK: - P2:isRefreshing 生命周期(手动刷新按钮显示进度/禁用重复点击的依据)
+
+    /// 刷新在途期间 isRefreshing 必须为 true;全部完成后复位为 false
+    func testRefreshAllSetsIsRefreshingDuringAndClearsAfter() async throws {
+        let t = makeGatedTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        XCTAssertFalse(t.store.isRefreshing, "初始必须为 false")
+
+        let started = XCTestExpectation(description: "fetch 已开始")
+        let gate = DispatchSemaphore(value: 0)
+        GatedURLProtocol.handler = { request in okResponse(request.url!, body: quotaHTML) }
+        GatedURLProtocol.gates = [gate]
+        GatedURLProtocol.startedExpectation = started
+
+        let task = Task { await t.store.refreshAll() }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertTrue(t.store.isRefreshing, "fetch 在途期间 isRefreshing 必须为 true")
+
+        gate.signal()
+        await task.value
+        XCTAssertFalse(t.store.isRefreshing, "刷新完成后必须复位为 false")
+        XCTAssertNotNil(t.store.accounts[0].usage)
+    }
+
+    /// 刷新失败(HTTP 500)路径同样复位为 false(失败也必须复位)
+    func testRefreshAllClearsIsRefreshingAfterFailure() async throws {
+        let t = makeGatedTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        let started = XCTestExpectation(description: "fetch 已开始")
+        let gate = DispatchSemaphore(value: 0)
+        GatedURLProtocol.handler = { request in errorResponse(request.url!, statusCode: 500) }
+        GatedURLProtocol.gates = [gate]
+        GatedURLProtocol.startedExpectation = started
+
+        let task = Task { await t.store.refreshAll() }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertTrue(t.store.isRefreshing)
+
+        gate.signal()
+        await task.value
+        XCTAssertFalse(t.store.isRefreshing, "失败后也必须复位为 false")
+        XCTAssertNotNil(t.store.accounts[0].usageError)
+    }
+
+    /// 空账号列表(无网络请求)刷新后同样复位为 false
+    func testRefreshAllWithNoAccountsEndsNotRefreshing() async throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        await t.store.refreshAll()
+        XCTAssertFalse(t.store.isRefreshing)
+    }
 }
