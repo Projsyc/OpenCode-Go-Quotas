@@ -11,6 +11,9 @@ final class AccountStore {
     private(set) var demoMode = false
     /// 账号数据文件读取/解码失败时的用户可见错误(启动加载时置位,首次成功保存后清空)
     private(set) var loadError: String?
+    /// 是否正在执行 refreshAll(手动刷新按钮据此显示进度 spinner 并禁用重复点击;
+    /// 启动等场景无需等待此状态,界面照常渲染)
+    private(set) var isRefreshing = false
 
     private static let logger = Logger(subsystem: "com.acccan.opencode-go", category: "account-store")
 
@@ -248,6 +251,11 @@ final class AccountStore {
     /// 而非串行之和),聚合后回到主线程统一按 id 写回,且只落盘一次。
     /// 子任务只返回 (id, usage, error) 元组,不触碰 accounts,天然避免跨线程数据竞争。
     func refreshAll() async {
+        // 生命周期标记:进入即置位,所有退出路径(demo 提前返回/成功/失败)统一复位。
+        // refreshAll 为 @MainActor async,置位与复位都在同一 actor 上下文,不跨线程
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         // demo 模式无网络请求,保持原串行行为(逐账号 demoRefresh,不落盘)
         if demoMode {
             for account in accounts { await refresh(account) }
