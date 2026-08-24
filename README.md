@@ -113,11 +113,12 @@ bash tools/build-dmg.sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
-209 个单测覆盖:额度/历史解析(URLProtocol mock,含非 HTTP 响应容错)、cookie 解密 round-trip(本地构造 Chrome 127+ 加密样本)、
+217 个单测覆盖:额度/历史解析(URLProtocol mock,含非 HTTP 响应容错)、cookie 解密 round-trip(本地构造 Chrome 127+ 加密样本)、
 TOTP 生成(RFC 6238 向量 + base32 变体 + 倒计时边界)、GitHub 批量导入解析(分隔符/引号/凭据类型推断)、
 GitHub 账号存储(内存 Keychain mock,读写/去重/导入摘要)、导入预览行级解析(无效行不阻塞)、
 GitHub 自动登录状态机(URL→决策/JS 转义/cookie 提取,含终态守卫/超时重启/过期码不填入)、
-自动保存查重(同表单防重/Workspace 查重)、数据文件写前快照与损坏自动恢复、刷新失败自动重试与 isRefreshing 状态、
+一次性注入受控重试(退避序列/未命中判定)、自动保存查重(同表单防重/Workspace 查重)、
+数据文件写前快照与损坏自动恢复、刷新失败自动重试与 isRefreshing 状态、
 钥匙串免提示 ACL 迁移(指纹重迁移)、费用格式化(保底 2 位小数)、demo 隔离与凭据清除。
 
 ## 与原项目的差异
