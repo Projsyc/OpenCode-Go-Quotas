@@ -49,18 +49,7 @@ struct AccountCardView: View {
             footbar(account)
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.25), Color.primary.opacity(0.05)],
-                                startPoint: .topLeading, endPoint: .bottomTrailing)))
-                .shadow(color: .black.opacity(hovering ? 0.15 : 0.08), radius: hovering ? 20 : 10, y: 5))
-        .scaleEffect(hovering ? 1.012 : 1)
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hovering)
+        .cardShell(hovering: hovering, hoverShadowOpacity: 0.15, hoverShadowRadius: 20)
         .onHover { hovering = $0 }
         .onTapGesture {
             if !account.historyLoading, store.cookie(for: account) != nil || store.demoMode {

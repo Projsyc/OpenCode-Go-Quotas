@@ -51,7 +51,7 @@ final class GitHubAccountStoreDemoTests: XCTestCase {
             GitHubImportRow(lineNumber: 1, username: "imported-user", password: "import-pass-123",
                             credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret),
         ])
-        _ = try t.store.add(username: "added-user", password: "added-pass-123")
+        _ = try t.store.add(GitHubAccountInput(username: "added-user", password: "added-pass-123"))
         try t.store.clearCredential(t.store.accounts[0].id)
         t.store.delete(t.store.accounts[0].id)
 
@@ -115,8 +115,9 @@ final class GitHubAccountStoreDemoTests: XCTestCase {
             keychain: keychain, fileURL: dir.appendingPathComponent("github-accounts.json"))
 
         let account = try store.add(
-            username: "octocat", password: "P@ssw0rd-1",
-            credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret)
+            GitHubAccountInput(
+                username: "octocat", password: "P@ssw0rd-1",
+                credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
         XCTAssertEqual(store.credential(for: account), "GEZDGNBVGY3TQOJQ")
 
         try store.clearCredential(account.id)
@@ -137,7 +138,7 @@ final class GitHubAccountStoreDemoTests: XCTestCase {
         let store = GitHubAccountStore(
             keychain: InMemoryKeychain(), fileURL: dir.appendingPathComponent("github-accounts.json"))
 
-        let account = try store.add(username: "alice", password: "pass123456", credential: "123456", kind: .oneTimeCode)
+        let account = try store.add(GitHubAccountInput(username: "alice", password: "pass123456", credential: "123456", kind: .oneTimeCode))
         XCTAssertNotNil(store.accounts[0].lastCodeAt)
 
         try store.clearCredential(account.id)
