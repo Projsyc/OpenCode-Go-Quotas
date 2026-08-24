@@ -292,4 +292,93 @@ final class GitHubAccountStoreTests: XCTestCase {
         // 该行被跳过,不得留下孤儿 <uuid>-password 条目
         XCTAssertTrue(t.keychain.storage.allSatisfy { !$0.key.hasSuffix("-password") })
     }
+
+    // MARK: - 写前快照 + 损坏回退
+
+    /// 写前快照:第二次 save() 前把第一次内容快照到 github-accounts.json.bak
+    func testSaveSnapshotsPreviousContentBeforeOverwrite() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.add(GitHubAccountInput(username: "first", password: "pass-123456"))
+        _ = try t.store.add(GitHubAccountInput(username: "second", password: "pass-654321"))
+
+        let backupURL = t.dir.appendingPathComponent("github-accounts.json.bak")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path), "第二次写入前必须已生成快照")
+        let snapshotted = try JSONDecoder().decode([GitHubAccount].self, from: Data(contentsOf: backupURL))
+        XCTAssertEqual(snapshotted.count, 1)
+        XCTAssertEqual(snapshotted[0].username, "first") // 快照 = 第一次(写前)的内容
+        let current = try JSONDecoder().decode([GitHubAccount].self, from: Data(contentsOf: t.fileURL))
+        XCTAssertEqual(current.count, 2)
+    }
+
+    /// 首次写入(无旧文件)→ 不产生快照
+    func testFirstSaveCreatesNoSnapshot() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.add(GitHubAccountInput(username: "only", password: "pass-123456"))
+        let backupURL = t.dir.appendingPathComponent("github-accounts.json.bak")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path), "首次写入无旧文件,不应产生快照")
+    }
+
+    /// 损坏回退:主文件损坏 + 快照完好 → load 返回快照内容,loadError 提示已恢复,主文件被修复
+    func testLoadCorruptedFileFallsBackToSnapshot() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.add(GitHubAccountInput(username: "完好账号", password: "pass-123456"))
+        _ = try t.store.add(GitHubAccountInput(username: "最新写入", password: "pass-654321"))
+        // 此刻 github-accounts.json.bak = 第一次写入([完好账号])
+
+        try Data("not json {".utf8).write(to: t.fileURL) // 模拟主文件损坏
+        let store = GitHubAccountStore(keychain: t.keychain, fileURL: t.fileURL)
+
+        XCTAssertEqual(store.accounts.count, 1)
+        XCTAssertEqual(store.accounts[0].username, "完好账号") // 从快照恢复
+        let error = try XCTUnwrap(store.loadError)
+        XCTAssertTrue(error.contains("已从备份恢复数据"), "实际: \(error)")
+        // 主文件已用快照内容修复:可直接解码且与恢复结果一致
+        let restored = try JSONDecoder().decode([GitHubAccount].self, from: Data(contentsOf: t.fileURL))
+        XCTAssertEqual(restored, store.accounts)
+        // 损坏原件已留证(github-accounts.json.bak-<时间戳>)
+        let evidence = try FileManager.default.contentsOfDirectory(atPath: t.dir.path)
+            .filter { $0.hasPrefix("github-accounts.json.bak-") }
+        XCTAssertEqual(evidence.count, 1)
+        XCTAssertEqual(try String(contentsOf: t.dir.appendingPathComponent(evidence[0]), encoding: .utf8),
+                       "not json {")
+    }
+
+    /// 损坏回退-快照缺失或同样损坏 → 空数组不崩,loadError 置位,损坏原件留证
+    func testLoadCorruptedWithCorruptedSnapshotFallsBackToEmpty() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        try Data("broken main".utf8).write(to: t.fileURL)
+        try Data("broken snap".utf8).write(to: t.dir.appendingPathComponent("github-accounts.json.bak"))
+
+        let store = GitHubAccountStore(keychain: t.keychain, fileURL: t.fileURL)
+        XCTAssertTrue(store.accounts.isEmpty)
+        let error = try XCTUnwrap(store.loadError)
+        XCTAssertTrue(error.contains("github-accounts.json.bak-"), "实际: \(error)")
+        let backups = try FileManager.default.contentsOfDirectory(atPath: t.dir.path)
+            .filter { $0.hasPrefix("github-accounts.json.bak-") }
+        XCTAssertEqual(backups.count, 1)
+    }
+
+    /// 快照失败(旧快照被置不可变,移除/复制都失败)→ 保存仍成功、不抛,主文件正常更新
+    func testSnapshotFailureDoesNotBlockSave() throws {
+        let t = makeTempStore()
+        let backupURL = t.dir.appendingPathComponent("github-accounts.json.bak")
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: backupURL.path)
+            try? FileManager.default.removeItem(at: t.dir)
+        }
+        _ = try t.store.add(GitHubAccountInput(username: "A", password: "pass-123456"))
+        _ = try t.store.add(GitHubAccountInput(username: "B", password: "pass-654321"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: backupURL.path)
+
+        _ = try t.store.add(GitHubAccountInput(username: "C", password: "pass-999999"))
+
+        let current = try JSONDecoder().decode([GitHubAccount].self, from: Data(contentsOf: t.fileURL))
+        XCTAssertEqual(current.count, 3) // 主文件已正常更新,保存未被快照失败阻断
+        XCTAssertNil(t.store.loadError)
+    }
 }
