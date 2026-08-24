@@ -20,7 +20,13 @@ PLIST="$DIST/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$PLIST"
 
 echo "==> 3/5 符号 + 渲染背景"
-codesign --force --deep -s - "$DIST"
+# 优先用 "OpenCodeGo Dev" 证书身份签名(钥匙串 ACL 需求绑定证书而非 CDHash,
+# 历次构建免 Keychain 弹窗);身份未导入则退回 ad-hoc。
+SIGN_ID="-"
+if security find-identity -p codesigning 2>/dev/null | grep -q "OpenCodeGo Dev"; then
+  SIGN_ID="OpenCodeGo Dev"
+fi
+codesign --force --deep -s "$SIGN_ID" "$DIST"
 swift "$ROOT/tools/render-dmg-background.swift"
 
 echo "==> 4/5 组装 staging + DS_Store 布局"
