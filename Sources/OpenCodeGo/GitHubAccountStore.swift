@@ -17,6 +17,7 @@ struct GitHubImportSkip: Equatable, Sendable {
 /// GitHub 账号存储错误
 enum GitHubAccountStoreError: LocalizedError, Equatable {
     case emptyUsername
+    case usernameContainsWhitespace
     case passwordTooShort
     case duplicateUsername(String)
     case credentialWithoutKind
@@ -24,6 +25,7 @@ enum GitHubAccountStoreError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .emptyUsername: return "用户名不能为空"
+        case .usernameContainsWhitespace: return "用户名不能包含空白字符"
         case .passwordTooShort: return "密码至少 6 个字符"
         case .duplicateUsername(let name): return "用户名 \(name) 已存在"
         case .credentialWithoutKind: return "提供验证码/TOTP secret 时必须指定凭据类型"
@@ -236,6 +238,9 @@ final class GitHubAccountStore {
     func add(_ input: GitHubAccountInput) throws -> GitHubAccount {
         let name = input.username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw GitHubAccountStoreError.emptyUsername }
+        guard !name.contains(where: { $0.isWhitespace }) else {
+            throw GitHubAccountStoreError.usernameContainsWhitespace
+        }
         let pwd = input.password.trimmingCharacters(in: .whitespacesAndNewlines)
         guard pwd.count >= 6 else { throw GitHubAccountStoreError.passwordTooShort }
         guard input.credential == nil || input.kind != nil else { throw GitHubAccountStoreError.credentialWithoutKind }
@@ -276,6 +281,9 @@ final class GitHubAccountStore {
         guard let i = accounts.firstIndex(where: { $0.id == id }) else { return }
         let name = input.username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw GitHubAccountStoreError.emptyUsername }
+        guard !name.contains(where: { $0.isWhitespace }) else {
+            throw GitHubAccountStoreError.usernameContainsWhitespace
+        }
         if passwordChanged,
            input.password.trimmingCharacters(in: .whitespacesAndNewlines).count < 6 {
             throw GitHubAccountStoreError.passwordTooShort
@@ -357,8 +365,18 @@ final class GitHubAccountStore {
                 skipped.append(GitHubImportSkip(lineNumber: row.lineNumber, reason: "用户名不能为空"))
                 continue
             }
+            if name.contains(where: { $0.isWhitespace }) {
+                skipped.append(GitHubImportSkip(lineNumber: row.lineNumber, reason: "用户名不能包含空白字符"))
+                continue
+            }
             if pwd.count < 6 {
                 skipped.append(GitHubImportSkip(lineNumber: row.lineNumber, reason: "密码至少 6 个字符"))
+                continue
+            }
+            if let cred = row.credential, cred.trimmingCharacters(in: .whitespaces).isEmpty {
+                // 空串凭据 + 非空 kind 会命中 (credential?, kind?) 分支写出空凭据
+                // → 卡片 TOTP 永远显示「—」;行级跳过(防御,解析器正常不会产出)
+                skipped.append(GitHubImportSkip(lineNumber: row.lineNumber, reason: "凭据数据缺失"))
                 continue
             }
             if seenUsernames.contains(name.lowercased()) {

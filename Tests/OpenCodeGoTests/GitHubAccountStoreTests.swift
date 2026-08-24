@@ -86,6 +86,24 @@ final class GitHubAccountStoreTests: XCTestCase {
         }
     }
 
+    /// ghaudit:store 是校验最后一环 —— add/update 拒绝含空白字符的用户名(与 UI/解析器一致)
+    func testAddAndUpdateRejectWhitespaceUsername() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        XCTAssertThrowsError(try t.store.add(GitHubAccountInput(username: "john doe", password: "pass123456"))) { error in
+            XCTAssertEqual(error as? GitHubAccountStoreError, .usernameContainsWhitespace)
+        }
+        let account = try t.store.add(GitHubAccountInput(username: "octocat", password: "pass123456"))
+        XCTAssertThrowsError(try t.store.update(
+            account.id,
+            input: GitHubAccountInput(username: "bob smith", password: ""),
+            passwordChanged: false)) { error in
+            XCTAssertEqual(error as? GitHubAccountStoreError, .usernameContainsWhitespace)
+        }
+        // 失败的 update 未改动内存
+        XCTAssertEqual(t.store.accounts[0].username, "octocat")
+    }
+
     /// L8:add 中第二项 Keychain 写入失败 → 回滚第一项,不留孤儿条目,内存不变
     func testAddKeychainFailureRollsBackPassword() throws {
         let t = makeTempStore()
@@ -274,6 +292,24 @@ final class GitHubAccountStoreTests: XCTestCase {
         XCTAssertEqual(summary.imported, 0)
         XCTAssertEqual(summary.skipped.count, 1)
         XCTAssertTrue(summary.skipped[0].reason.hasPrefix("凭据写入失败"))
+    }
+
+    /// ghaudit:直接构造的 GitHubImportRow(绕过解析器)行级防御:空白用户名 / 空串凭据
+    /// 不得入库(空串凭据 + 非空 kind 会命中 (credential?, kind?) 分支写出空凭据,
+    /// 导致卡片 TOTP 永远显示「—」)
+    func testImportBatchSkipsWhitespaceUsernameAndEmptyCredential() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        let rows = [
+            GitHubImportRow(lineNumber: 1, username: "john doe", password: "pass123456", credential: nil, kind: nil),
+            GitHubImportRow(lineNumber: 2, username: "u2", password: "pass123456", credential: "", kind: .totpSecret),
+            GitHubImportRow(lineNumber: 3, username: "u3", password: "pass123456", credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret),
+        ]
+        let summary = try t.store.importBatch(rows)
+        XCTAssertEqual(summary.imported, 1)
+        XCTAssertEqual(summary.skipped.map(\.lineNumber), [1, 2])
+        XCTAssertEqual(summary.skipped.map(\.reason), ["用户名不能包含空白字符", "凭据数据缺失"])
+        XCTAssertEqual(t.store.accounts.map(\.username), ["u3"])
     }
 
     /// L8:批量导入中 credential 写失败 → 回滚该行已写的 password,不留孤儿条目
