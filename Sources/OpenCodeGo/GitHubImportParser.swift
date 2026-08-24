@@ -32,58 +32,65 @@ enum GitHubImportParser {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         var rows: [GitHubImportRow] = []
         for (index, raw) in lines.enumerated() {
-            let lineNumber = index + 1
-            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.isEmpty || line.hasPrefix("#") { continue }
-
-            let fields = try splitFields(line, lineNumber: lineNumber)
-            guard fields.count >= 2, fields.count <= 3 else {
-                throw GitHubParseError.invalidRow(
-                    line: lineNumber,
-                    reason: fields.count < 2
-                        ? "列数不足(应包含用户名和密码)"
-                        : "列数过多(应为 2~3 列,实际 \(fields.count) 列)")
-            }
-
-            let username = fields[0]
-            let password = fields[1]
-            guard !username.isEmpty else {
-                throw GitHubParseError.invalidRow(line: lineNumber, reason: "用户名不能为空")
-            }
-            guard !username.contains(where: { $0.isWhitespace }) else {
-                throw GitHubParseError.invalidRow(line: lineNumber, reason: "用户名不能包含空白字符")
-            }
-            guard !password.isEmpty, password.count >= 6 else {
-                throw GitHubParseError.invalidRow(line: lineNumber, reason: "密码不能为空且至少 6 个字符")
-            }
-
-            if fields.count == 3 {
-                let credential = fields[2]
-                let kind = classifyCredential(credential)
-                guard !credential.isEmpty, let kind else {
-                    throw GitHubParseError.invalidRow(
-                        line: lineNumber,
-                        reason: credential.isEmpty
-                            ? "第三列(验证码/TOTP secret)为空"
-                            : "验证码/TOTP secret 格式无效")
-                }
-                rows.append(GitHubImportRow(
-                    lineNumber: lineNumber,
-                    username: username,
-                    password: password,
-                    credential: credential,
-                    kind: kind))
-            } else {
-                rows.append(GitHubImportRow(
-                    lineNumber: lineNumber,
-                    username: username,
-                    password: password,
-                    credential: nil,
-                    kind: nil))
+            if let row = try parseRow(String(raw), lineNumber: index + 1) {
+                rows.append(row)
             }
         }
         guard !rows.isEmpty else { throw GitHubParseError.emptyInput }
         return rows
+    }
+
+    /// 逐行解析入口:空行 / `#` 注释行返回 nil(跳过);无效行抛带行号的错误;
+    /// 空输入(emptyInput)是全文级语义,不在此抛。供逐行预览等场景复用,
+    /// 避免与 `parse` 重复「按行拆分 + 空行/注释跳过」逻辑。
+    static func parseRow(_ line: String, lineNumber: Int) throws -> GitHubImportRow? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.hasPrefix("#") { return nil }
+
+        let fields = try splitFields(trimmed, lineNumber: lineNumber)
+        guard fields.count >= 2, fields.count <= 3 else {
+            throw GitHubParseError.invalidRow(
+                line: lineNumber,
+                reason: fields.count < 2
+                    ? "列数不足(应包含用户名和密码)"
+                    : "列数过多(应为 2~3 列,实际 \(fields.count) 列)")
+        }
+
+        let username = fields[0]
+        let password = fields[1]
+        guard !username.isEmpty else {
+            throw GitHubParseError.invalidRow(line: lineNumber, reason: "用户名不能为空")
+        }
+        guard !username.contains(where: { $0.isWhitespace }) else {
+            throw GitHubParseError.invalidRow(line: lineNumber, reason: "用户名不能包含空白字符")
+        }
+        guard !password.isEmpty, password.count >= 6 else {
+            throw GitHubParseError.invalidRow(line: lineNumber, reason: "密码不能为空且至少 6 个字符")
+        }
+
+        if fields.count == 3 {
+            let credential = fields[2]
+            let kind = GitHubCredentialKind.kind(for: credential)
+            guard !credential.isEmpty, let kind else {
+                throw GitHubParseError.invalidRow(
+                    line: lineNumber,
+                    reason: credential.isEmpty
+                        ? "第三列(验证码/TOTP secret)为空"
+                        : "验证码/TOTP secret 格式无效")
+            }
+            return GitHubImportRow(
+                lineNumber: lineNumber,
+                username: username,
+                password: password,
+                credential: credential,
+                kind: kind)
+        }
+        return GitHubImportRow(
+            lineNumber: lineNumber,
+            username: username,
+            password: password,
+            credential: nil,
+            kind: nil)
     }
 
     /// 解析 CSV 文件数据(假定 UTF-8;编码无效按第 1 行报错)
@@ -155,19 +162,6 @@ enum GitHubImportParser {
         }
         fields.append(current)
         return fields
-    }
-
-    /// 第三列分类:6 位纯数字 → 一次性验证码;合法 base32 且解码 ≥ 8 字节 → TOTP secret
-    private static func classifyCredential(_ raw: String) -> GitHubCredentialKind? {
-        let value = raw.trimmingCharacters(in: .whitespaces)
-        if value.count == 6,
-           value.allSatisfy({ $0.isASCII && $0.isWholeNumber }) {
-            return .oneTimeCode
-        }
-        if let decoded = TOTPGenerator.decodeBase32(value), decoded.count >= 8 {
-            return .totpSecret
-        }
-        return nil
     }
 
     private static func trimField(_ field: String) -> String {
