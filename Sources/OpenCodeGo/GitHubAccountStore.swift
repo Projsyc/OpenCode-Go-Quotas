@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 
 /// 批量导入结果摘要:成功导入数 + 被跳过行列表
 struct GitHubImportSummary: Equatable, Sendable {
@@ -37,9 +38,17 @@ final class GitHubAccountStore {
     private(set) var accounts: [GitHubAccount] = []
     /// 演示模式(启动参数 --demo 或注入):内存 Keychain + 内存存储,不落盘、不碰真实数据
     private(set) var demoMode = false
+    /// 数据文件读取/解码失败时的用户可见错误(启动加载时置位,首次成功保存后清空)
+    private(set) var loadError: String?
+
+    private static let logger = Logger(subsystem: "com.acccan.opencode-go", category: "github-account-store")
 
     private let keychain: KeychainStoring
     private let fileURL: URL
+    /// 写前滚动快照路径(单份):每次 save 前把当前 github-accounts.json 复制到这里
+    private var snapshotURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("github-accounts.json.bak")
+    }
 
     /// - Parameters:
     ///   - keychain: nil → KeychainHelper(service: "com.acccan.opencode-go.github")
@@ -103,13 +112,82 @@ final class GitHubAccountStore {
 
     // MARK: - 持久化
 
-    /// 幂等加载:JSON 不存在或解码失败时静默为空数组;demo 模式不读盘(数据为预置假账号)
+    /// 幂等加载:JSON 不存在或解码失败时静默为空数组;demo 模式不读盘(数据为预置假账号)。
+    /// 主文件存在但解码失败(损坏)时,优先从写前快照 github-accounts.json.bak 恢复;
+    /// 快照同样不可用才按原行为(空数组),绝不静默清空。
     private func load() {
-        guard !demoMode,
-              let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([GitHubAccount].self, from: data)
-        else { return }
-        accounts = decoded
+        guard !demoMode else { return }
+        guard let data = try? Data(contentsOf: fileURL) else { return } // 不存在/不可读 → 首次运行
+        do {
+            accounts = try JSONDecoder().decode([GitHubAccount].self, from: data)
+        } catch {
+            if let backupData = try? Data(contentsOf: snapshotURL),
+               let recovered = try? JSONDecoder().decode([GitHubAccount].self, from: backupData) {
+                // 从快照恢复:仅换「读哪个文件」,不改账号字段/解码语义
+                accounts = recovered
+                // 先尽力把损坏原件复制留证,再把恢复内容写回主文件(否则下次启动会因
+                // 主文件缺失/损坏被当成首次运行,恢复结果丢失)
+                let backupName = stashCorruptedFile(move: false)
+                restoreMainFileFromSnapshot()
+                if let backupName {
+                    loadError = "GitHub 账号数据文件损坏，已从备份恢复数据（原文件已备份为 \(backupName)）"
+                } else {
+                    loadError = "GitHub 账号数据文件损坏，已从备份恢复数据"
+                }
+                Self.logger.error("github-accounts.json 解码失败，已从快照恢复数据")
+            } else {
+                // 快照缺失或同样损坏 → 尽量移动损坏原件留证后置空(否则下次 save()
+                // 的全量覆盖会永久丢弃它,且写前快照会抄到损坏内容)
+                accounts = []
+                if let backupName = stashCorruptedFile(move: true) {
+                    loadError = "GitHub 账号数据文件损坏，已备份为 \(backupName)，请检查后重新添加"
+                } else {
+                    loadError = "GitHub 账号数据文件损坏，且备份失败，请检查后重新添加"
+                }
+                Self.logger.error("github-accounts.json 解码失败且快照不可用，已置空")
+            }
+        }
+    }
+
+    /// 把损坏的 github-accounts.json 移动/复制备份为 github-accounts.json.bak-<时间戳>
+    /// (同秒冲突自动加序号)。返回备份名;失败返回 nil(备份是保险不是依赖,调用方不阻断)。
+    @discardableResult
+    private func stashCorruptedFile(move: Bool) -> String? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let stamp = formatter.string(from: Date())
+        let dir = fileURL.deletingLastPathComponent()
+        var backupName = "github-accounts.json.bak-\(stamp)"
+        var backupURL = dir.appendingPathComponent(backupName)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: backupURL.path) {
+            backupName = "github-accounts.json.bak-\(stamp)-\(suffix)"
+            backupURL = dir.appendingPathComponent(backupName)
+            suffix += 1
+        }
+        do {
+            if move {
+                try FileManager.default.moveItem(at: fileURL, to: backupURL)
+            } else {
+                try FileManager.default.copyItem(at: fileURL, to: backupURL)
+            }
+            return backupName
+        } catch {
+            return nil
+        }
+    }
+
+    /// 恢复后把主文件写回可用状态:用快照内容覆盖损坏的 github-accounts.json(字节一致)。
+    /// 失败仅记日志 —— 内存中的恢复结果仍在,且会话内任意一次 save() 会重新落盘。
+    private func restoreMainFileFromSnapshot() {
+        do {
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+            try FileManager.default.copyItem(at: snapshotURL, to: fileURL)
+        } catch {
+            Self.logger.error("从快照写回 github-accounts.json 失败: \(error.localizedDescription)")
+        }
     }
 
     /// demo 模式不落盘(内存存储)
@@ -117,10 +195,33 @@ final class GitHubAccountStore {
         guard !demoMode else { return }
         try? FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        snapshotBeforeWrite()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(accounts) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        do {
+            try data.write(to: fileURL, options: .atomic)
+            // 首次成功落盘后清空启动加载错误;写盘失败时保留
+            loadError = nil
+        } catch {
+            // 写盘失败 → 保留 loadError(数据仍不可靠)
+            Self.logger.error("github-accounts.json 写盘失败: \(error.localizedDescription)")
+        }
+    }
+
+    /// 写盘前把当前 github-accounts.json 复制为滚动快照 github-accounts.json.bak(单份):
+    /// 仅当写前文件已存在才快照(首次写入无旧文件 → 跳过);失败不阻断保存,只记日志
+    /// (备份是保险不是依赖)。
+    private func snapshotBeforeWrite() {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            if FileManager.default.fileExists(atPath: snapshotURL.path) {
+                try FileManager.default.removeItem(at: snapshotURL)
+            }
+            try FileManager.default.copyItem(at: fileURL, to: snapshotURL)
+        } catch {
+            Self.logger.error("写前快照 github-accounts.json.bak 失败: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Keychain key 约定:<uuid>-password / <uuid>-credential

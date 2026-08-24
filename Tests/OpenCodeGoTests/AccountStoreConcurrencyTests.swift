@@ -369,6 +369,98 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         XCTAssertTrue(contents.contains("broken two"))
     }
 
+    // MARK: - M5:写前快照 + 损坏回退
+
+    /// 写前快照:第二次 save() 前必须把第一次写入的内容快照到 accounts.json.bak
+    func testSaveSnapshotsPreviousContentBeforeOverwrite() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "第一代", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        _ = try t.store.addAccount(name: "第二代", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        let backupURL = t.dir.appendingPathComponent("accounts.json.bak")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path), "第二次写入前必须已生成快照")
+        let snapshotted = try JSONDecoder().decode([Account].self, from: Data(contentsOf: backupURL))
+        XCTAssertEqual(snapshotted.count, 1)
+        XCTAssertEqual(snapshotted[0].name, "第一代") // 快照 = 第一次(写前)的内容
+        let current = try JSONDecoder().decode([Account].self, from: Data(contentsOf: t.fileURL))
+        XCTAssertEqual(current.count, 2)
+    }
+
+    /// 首次写入(无旧文件)→ 不产生快照
+    func testFirstSaveCreatesNoSnapshot() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "唯一", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        let backupURL = t.dir.appendingPathComponent("accounts.json.bak")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path), "首次写入无旧文件,不应产生快照")
+    }
+
+    /// 损坏回退:主文件损坏 + 快照完好 → load 返回快照内容,loadError 提示已从备份恢复,
+    /// 主文件被修复为可用状态,损坏原件留证
+    func testLoadCorruptedFileFallsBackToSnapshot() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "完好账号", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        _ = try t.store.addAccount(name: "最新写入", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        // 此刻 accounts.json.bak = 第一次写入([完好账号]),主文件 = [完好账号,最新写入]
+
+        try Data("not json {".utf8).write(to: t.fileURL) // 模拟主文件损坏
+        let store = AccountStore(client: makeClient(), keychain: InMemoryKeychain(), fileURL: t.fileURL)
+
+        XCTAssertEqual(store.accounts.count, 1)
+        XCTAssertEqual(store.accounts[0].name, "完好账号") // 从快照恢复
+        let error = try XCTUnwrap(store.loadError)
+        XCTAssertTrue(error.contains("已从备份恢复数据"), "实际: \(error)")
+        // 主文件已用快照内容修复:可直接解码且内容与快照一致
+        let restored = try JSONDecoder().decode([Account].self, from: Data(contentsOf: t.fileURL))
+        XCTAssertEqual(restored, store.accounts)
+        // 损坏原件已留证(accounts.json.bak-<时间戳>)
+        let evidence = try FileManager.default.contentsOfDirectory(atPath: t.dir.path)
+            .filter { $0.hasPrefix("accounts.json.bak-") }
+        XCTAssertEqual(evidence.count, 1)
+        XCTAssertEqual(try String(contentsOf: t.dir.appendingPathComponent(evidence[0]), encoding: .utf8),
+                       "not json {")
+    }
+
+    /// 损坏回退-快照缺失或同样损坏 → 空列表不崩,loadError 置位,损坏原件留证
+    func testLoadCorruptedWithCorruptedSnapshotFallsBackToEmpty() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        try Data("broken main".utf8).write(to: t.fileURL)
+        try Data("broken snap".utf8).write(to: t.dir.appendingPathComponent("accounts.json.bak"))
+
+        let store = AccountStore(client: makeClient(), keychain: InMemoryKeychain(), fileURL: t.fileURL)
+        XCTAssertTrue(store.accounts.isEmpty)
+        let error = try XCTUnwrap(store.loadError)
+        XCTAssertTrue(error.contains("accounts.json.bak-"), "实际: \(error)")
+        let backups = try FileManager.default.contentsOfDirectory(atPath: t.dir.path)
+            .filter { $0.hasPrefix("accounts.json.bak-") }
+        XCTAssertEqual(backups.count, 1)
+    }
+
+    /// 快照失败(旧快照被置不可变,移除/复制都失败)→ 保存仍成功、不抛,主文件正常更新
+    func testSnapshotFailureDoesNotBlockSave() throws {
+        let t = makeTempStore()
+        let backupURL = t.dir.appendingPathComponent("accounts.json.bak")
+        addTeardownBlock {
+            // 先清掉 immutable 标志否则目录删不掉
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: backupURL.path)
+            try? FileManager.default.removeItem(at: t.dir)
+        }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        _ = try t.store.addAccount(name: "B", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+        // 旧快照置 immutable → removeItem/copyItem 均失败,快照步骤抛错但必须被吞掉
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: backupURL.path)
+
+        _ = try t.store.addAccount(name: "C", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        let current = try JSONDecoder().decode([Account].self, from: Data(contentsOf: t.fileURL))
+        XCTAssertEqual(current.count, 3) // 主文件已正常更新,保存未被快照失败阻断
+        XCTAssertNil(t.store.loadError)
+    }
+
     // MARK: - L8:updateAccount Keychain 写失败的一致性
 
     /// set 抛错 → 内存/Keychain/磁盘全部保持原状,并向上抛错

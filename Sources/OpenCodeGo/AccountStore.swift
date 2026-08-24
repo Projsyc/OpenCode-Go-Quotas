@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 
 /// 账号存储与刷新逻辑:Cookie 存 Keychain,账号元数据 + 上次额度快照存 JSON
 @MainActor
@@ -11,9 +12,15 @@ final class AccountStore {
     /// 账号数据文件读取/解码失败时的用户可见错误(启动加载时置位,首次成功保存后清空)
     private(set) var loadError: String?
 
+    private static let logger = Logger(subsystem: "com.acccan.opencode-go", category: "account-store")
+
     private let keychain: KeychainStoring
     private let client: QuotaClient
     private let fileURL: URL
+    /// 写前滚动快照路径(单份):每次 save 前把当前 accounts.json 复制到这里
+    private var snapshotURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("accounts.json.bak")
+    }
 
     /// - Parameters:
     ///   - client: 额度客户端(默认 .shared)
@@ -63,10 +70,28 @@ final class AccountStore {
         do {
             accounts = try JSONDecoder().decode([Account].self, from: Data(contentsOf: fileURL))
         } catch {
-            // 文件存在但读取/解码失败 → 备份原文件后置空,绝不静默清空
+            // 主文件损坏:优先尝试从写前快照 accounts.json.bak 恢复
+            // (仅换「读哪个文件」,不改任何账号字段/解码语义)
+            if let recovered = try? JSONDecoder().decode(
+                [Account].self, from: Data(contentsOf: snapshotURL)
+            ) {
+                accounts = recovered
+                // 先尽力把损坏原件复制留证(不动主文件),再把恢复内容写回主文件:
+                // 若只留在内存,下次启动会因主文件缺失被当成「首次运行」,恢复结果丢失
+                let backupName = stashCorruptedFile(move: false)
+                restoreMainFileFromSnapshot()
+                if let backupName {
+                    loadError = "账号数据文件损坏，已从备份恢复数据（原文件已备份为 \(backupName)）"
+                } else {
+                    loadError = "账号数据文件损坏，已从备份恢复数据"
+                }
+                Self.logger.error("accounts.json 解码失败，已从快照 accounts.json.bak 恢复数据")
+                return
+            }
+            // 快照缺失或同样损坏 → 维持原行为:备份原文件后置空,绝不静默清空
             // (否则下次 save() 全量原子覆盖会永久丢失真实账号元数据)
             accounts = []
-            if let backupName = backupCorruptedFile() {
+            if let backupName = stashCorruptedFile(move: true) {
                 loadError = "账号数据文件损坏，已备份为 \(backupName)，请检查后重新添加"
             } else {
                 loadError = "账号数据文件损坏，且备份失败，请检查后重新添加"
@@ -74,10 +99,11 @@ final class AccountStore {
         }
     }
 
-    /// 把损坏的 accounts.json 移动备份为 accounts.json.bak-<时间戳>(同秒冲突自动加序号)。
-    /// 返回备份文件名;备份失败返回 nil。
+    /// 把损坏的 accounts.json 移动/复制备份为 accounts.json.bak-<时间戳>(同秒冲突自动加序号)。
+    /// 返回备份文件名;失败返回 nil(备份是保险不是依赖,调用方不阻断)。
+    /// - Parameter move: true → 移动(原文件消失,主路径不可读);false → 复制(原文件保留)
     @discardableResult
-    private func backupCorruptedFile() -> String? {
+    private func stashCorruptedFile(move: Bool) -> String? {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let stamp = formatter.string(from: Date())
@@ -91,16 +117,34 @@ final class AccountStore {
             suffix += 1
         }
         do {
-            try FileManager.default.moveItem(at: fileURL, to: backupURL)
+            if move {
+                try FileManager.default.moveItem(at: fileURL, to: backupURL)
+            } else {
+                try FileManager.default.copyItem(at: fileURL, to: backupURL)
+            }
             return backupName
         } catch {
             return nil
         }
     }
 
+    /// 恢复后把主文件写回可用状态:用快照内容覆盖损坏的 accounts.json(字节一致)。
+    /// 失败仅记日志 —— 内存中的恢复结果仍在,且会话内任意一次 save() 会重新落盘。
+    private func restoreMainFileFromSnapshot() {
+        do {
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+            try FileManager.default.copyItem(at: snapshotURL, to: fileURL)
+        } catch {
+            Self.logger.error("从快照写回 accounts.json 失败: \(error.localizedDescription)")
+        }
+    }
+
     private func save() {
         try? FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        snapshotBeforeWrite()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(accounts) else { return }
@@ -110,6 +154,21 @@ final class AccountStore {
             loadError = nil
         } catch {
             // 写盘失败 → 保留 loadError(数据仍不可靠,红条继续提示)
+        }
+    }
+
+    /// 写盘前把当前 accounts.json 复制为滚动快照 accounts.json.bak(单份,每次写前覆盖):
+    /// 仅当写前文件已存在才快照(首次写入无旧文件 → 跳过);失败不阻断保存,只记日志
+    /// (备份是保险不是依赖)。
+    private func snapshotBeforeWrite() {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            if FileManager.default.fileExists(atPath: snapshotURL.path) {
+                try FileManager.default.removeItem(at: snapshotURL)
+            }
+            try FileManager.default.copyItem(at: fileURL, to: snapshotURL)
+        } catch {
+            Self.logger.error("写前快照 accounts.json.bak 失败: \(error.localizedDescription)")
         }
     }
 
