@@ -252,4 +252,73 @@ final class GitHubImportParserTests: XCTestCase {
         let rows = try GitHubImportParser.parse(text)
         XCTAssertEqual(rows.map(\.lineNumber), [3, 5])
     }
+
+    // MARK: - ghatips:密码首尾空白检测(trim 提示依据)
+
+    /// 纯函数:引号包裹(内容按字面)→ 单侧 1 个空白也应提示;
+    /// 未加引号 → 单侧 1 个空白是分隔符约定(不算),≥ 2 个才提示。
+    func testPasswordEdgeWhitespacePureFunction() {
+        XCTAssertTrue(GitHubImportParser.passwordHasEdgeWhitespace(" pass1234", treatAsLiteral: true))
+        XCTAssertTrue(GitHubImportParser.passwordHasEdgeWhitespace("pass1234 ", treatAsLiteral: true))
+        XCTAssertTrue(GitHubImportParser.passwordHasEdgeWhitespace("  pass1234  ", treatAsLiteral: true))
+        // 未加引号:单侧 1 个空白 = 分隔符约定,不算密码内容
+        XCTAssertFalse(GitHubImportParser.passwordHasEdgeWhitespace(" pass1234"))
+        XCTAssertFalse(GitHubImportParser.passwordHasEdgeWhitespace("pass1234 "))
+        // 未加引号:单侧 ≥ 2 个空白 → 应提示
+        XCTAssertTrue(GitHubImportParser.passwordHasEdgeWhitespace("  pass1234"))
+        XCTAssertTrue(GitHubImportParser.passwordHasEdgeWhitespace("pass1234  "))
+        XCTAssertTrue(GitHubImportParser.passwordHasEdgeWhitespace("  pass1234  "))
+        XCTAssertFalse(GitHubImportParser.passwordHasEdgeWhitespace("pass1234"))
+        XCTAssertFalse(GitHubImportParser.passwordHasEdgeWhitespace(""))
+        XCTAssertFalse(GitHubImportParser.passwordHasEdgeWhitespace("   "))
+        XCTAssertFalse(GitHubImportParser.passwordHasEdgeWhitespace("   ", treatAsLiteral: true))
+        XCTAssertFalse(GitHubImportParser.passwordHasEdgeWhitespace("pa ss 1234"))
+    }
+
+    /// 逗号/Tab/分号分隔:密码列「应提示」首尾空白(trim 前)→ passwordHadEdgeWhitespace
+    func testParseFlagsPasswordEdgeWhitespace() throws {
+        // 未加引号 + 密码前导双空格 → 标记(单个空格是分隔符约定,不算)
+        let leading = try GitHubImportParser.parse("user1,  pass1234, GEZDGNBVGY3TQOJQ")
+        XCTAssertTrue(leading[0].passwordHadEdgeWhitespace)
+        XCTAssertEqual(leading[0].password, "pass1234")   // 仍按现有行为 trim 入库
+        // 未加引号 + 单侧单个空格(约定分隔格式)→ 不标记
+        let conventional = try GitHubImportParser.parse("user2, pass5678, 123456")
+        XCTAssertFalse(conventional[0].passwordHadEdgeWhitespace)
+        // Tab 分隔 + 密码含内部空白(无首尾空白)→ 不标记
+        let tab = try GitHubImportParser.parse("user3\tpass 1234\t123456")
+        XCTAssertFalse(tab[0].passwordHadEdgeWhitespace)
+        // 分号分隔 + 密码尾随双空格 → 标记
+        let semi = try GitHubImportParser.parse("user4;pass9012  ;GEZDGNBVGY3TQOJQ")
+        XCTAssertTrue(semi[0].passwordHadEdgeWhitespace)
+        // 无空白 → 不标记
+        let clean = try GitHubImportParser.parse("user5, pass1234, JBSWY3DPEHPK3PXP")
+        XCTAssertFalse(clean[0].passwordHadEdgeWhitespace)
+        // 2 列(仅用户名+密码)同样标记
+        let two = try GitHubImportParser.parse("user6,  pass1234")
+        XCTAssertTrue(two[0].passwordHadEdgeWhitespace)
+    }
+
+    /// 引号包裹的密码:内容按字面 → 单侧 1 个空白也算密码内容,能检测出首尾空白
+    func testParseQuotedPasswordEdgeWhitespace() throws {
+        let rows = try GitHubImportParser.parse(#"user1," pass1234 ",GEZDGNBVGY3TQOJQ"#)
+        XCTAssertEqual(rows[0].password, "pass1234")
+        XCTAssertTrue(rows[0].passwordHadEdgeWhitespace)
+        // 引号包裹但无首尾空白 → 不标记(引号只是转义分隔符等)
+        let plain = try GitHubImportParser.parse(#"user2,"pass1234",GEZDGNBVGY3TQOJQ"#)
+        XCTAssertFalse(plain[0].passwordHadEdgeWhitespace)
+    }
+
+    /// 空格分隔:token 按空白切分,密码天然无首尾空白 → 不标记
+    func testParseSpaceSeparatedNeverFlagsEdgeWhitespace() throws {
+        let rows = try GitHubImportParser.parse("user1 pass1234")
+        XCTAssertFalse(rows[0].passwordHadEdgeWhitespace)
+    }
+
+    /// 逐行入口(预览共用路径)同样携带标志
+    func testParseRowFlagsPasswordEdgeWhitespace() throws {
+        let row = try XCTUnwrap(GitHubImportParser.parseRow("user1,  pass1234", lineNumber: 9))
+        XCTAssertTrue(row.passwordHadEdgeWhitespace)
+        let clean = try XCTUnwrap(GitHubImportParser.parseRow("user2, pass1234, 123456", lineNumber: 2))
+        XCTAssertFalse(clean.passwordHadEdgeWhitespace)
+    }
 }

@@ -167,9 +167,16 @@ struct GitHubImportView: View {
             Spacer(minLength: 8)
             if row.error == nil {
                 // 密码只展示「已填」,绝不显示明文
-                Label("密码已填", systemImage: "checkmark")
-                    .font(.caption)
-                    .foregroundStyle(.green)
+                HStack(spacing: 6) {
+                    Label("密码已填", systemImage: "checkmark")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    if let hint = row.passwordHint {
+                        Text(hint)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
             } else if let error = row.error {
                 Text(error)
                     .font(.caption)
@@ -202,7 +209,7 @@ struct GitHubImportView: View {
                 .font(.callout.weight(.medium))
                 .foregroundStyle(isPartial ? .orange : .red)
             ForEach(outcome.skipped, id: \.lineNumber) { skip in
-                Text("第 \(skip.lineNumber) 行:\(skip.reason)")
+                Text(Self.skipText(skip))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -215,6 +222,12 @@ struct GitHubImportView: View {
     private func summaryText(_ outcome: ImportOutcome) -> String {
         guard case .partial(let imported, let skipped) = outcome else { return "" }
         return "已导入 \(imported) 个,跳过 \(skipped.count) 个(见下方明细)"
+    }
+
+    /// 跳过/错误行文案:行号 > 0 按行定位;行号 0 表示 importBatch 抛出的整批级错误
+    /// (如写盘失败,非行级)—— 显示「导入错误:<消息>」而非无意义的「第 0 行:」。
+    static func skipText(_ skip: GitHubImportSkip) -> String {
+        skip.lineNumber > 0 ? "第 \(skip.lineNumber) 行:\(skip.reason)" : "导入错误:\(skip.reason)"
     }
 
     // MARK: - 底部操作
@@ -335,4 +348,9 @@ struct GitHubImportPreviewRow: Identifiable, Equatable, Sendable {
 
     var id: Int { lineNumber }
     var kind: GitHubCredentialKind? { row?.kind }
+    /// 密码含首尾空白(解析时已按现有行为去除)的用户提示;无则 nil。
+    /// ghatips:提示用户知情,避免「trim 后静默变错密码、登录失败且不知情」。
+    var passwordHint: String? {
+        row?.passwordHadEdgeWhitespace == true ? "已去除密码首尾空白" : nil
+    }
 }
