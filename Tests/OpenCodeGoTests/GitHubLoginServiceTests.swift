@@ -34,13 +34,14 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertNotNil(d.javascript)
     }
 
-    /// 已提交过(填表完成)又回到登录页 = 账号/密码错误,应转手动而非死循环重填
+    /// 已提交过(填表完成)又回到登录页且无可用验证码(如一次性码已过期)→
+    /// 转手动提示补当前两步验证码,而非死循环重填或误导「登录未成功」
     func testDecideLoginPageAfterFailedSubmitGoesManual() {
         for state in [GitHubLoginStep.fillingCredentials, .twoFactor] {
             let d = GitHubLoginService.decide(
                 for: url("https://github.com/login"), githubUsername: "u", githubPassword: "p",
                 totpCode: nil, state: state)
-            XCTAssertEqual(d.step, .needsManualIntervention("GitHub 登录未成功,请在窗口中手动登录"))
+            XCTAssertEqual(d.step, .needsManualIntervention("请在窗口中输入当前两步验证码,完成后等待自动捕获"))
             XCTAssertNil(d.javascript)
         }
     }
@@ -111,7 +112,7 @@ final class GitHubLoginServiceTests: XCTestCase {
         let d = GitHubLoginService.decide(
             for: url("https://github.com/login"), githubUsername: "u", githubPassword: "p",
             totpCode: nil, state: .fillingCredentials)
-        XCTAssertEqual(d.step, .needsManualIntervention("GitHub 登录未成功,请在窗口中手动登录"))
+        XCTAssertEqual(d.step, .needsManualIntervention("请在窗口中输入当前两步验证码,完成后等待自动捕获"))
         XCTAssertNil(d.javascript)
         XCTAssertFalse(d.isOTPProbe)
     }
@@ -221,6 +222,35 @@ final class GitHubLoginServiceTests: XCTestCase {
             totpCode: nil, state: .waitingOAuthRedirect)
         XCTAssertEqual(d.step, .waitingOAuthRedirect)
         XCTAssertNil(d.javascript)
+    }
+
+    // MARK: - isOneTimeCodeExpired(一次性码过期判定)
+
+    /// 无记录时间(如账号未带 lastCodeAt)视为已过期:一次性码无法离线验证,超窗即无效
+    func testIsOneTimeCodeExpiredNilSinceIsExpired() {
+        XCTAssertTrue(GitHubLoginService.isOneTimeCodeExpired(since: nil, now: Date()))
+    }
+
+    /// 90s 宽限内(10s / 89s)视为仍有效
+    func testIsOneTimeCodeExpiredWithinGraceWindowIsValid() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertFalse(
+            GitHubLoginService.isOneTimeCodeExpired(since: now.addingTimeInterval(-10), now: now),
+            "10s 内有效")
+        XCTAssertFalse(
+            GitHubLoginService.isOneTimeCodeExpired(since: now.addingTimeInterval(-89), now: now),
+            "89s 在 90s 宽限内仍有效")
+    }
+
+    /// 超窗(91s)与远过期(600s)都判定为已过期
+    func testIsOneTimeCodeExpiredBeyondWindowIsExpired() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertTrue(
+            GitHubLoginService.isOneTimeCodeExpired(since: now.addingTimeInterval(-91), now: now),
+            "91s 超窗即过期")
+        XCTAssertTrue(
+            GitHubLoginService.isOneTimeCodeExpired(since: now.addingTimeInterval(-600), now: now),
+            "600s 早已过期")
     }
 
     // MARK: - extractAuthCookie
