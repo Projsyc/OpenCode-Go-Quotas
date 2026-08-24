@@ -313,19 +313,22 @@ final class QuotaClientTests: XCTestCase {
         XCTAssertTrue(ctx.contains("\\r"))
     }
 
-    func testHistoryDiagMatchFindsFirstCostMatch() {
-        // 复现 98M 之谜机制:cost 正则从其它键(_cost:)中捕获数字
+    func testHistoryDiagMatchSkipsSubstringCostField() {
+        // 复现 98M 之谜的原始 slice 保留为回归证据:total_cost 先于 cost 出现。
+        // 词边界锚定后,首个 cost: 匹配应来自真实 cost 字段(与 historyDouble 同一正则)
         let slice = #"..., total_cost:98711933, cost:0.0123, ..."#
         let diag = QuotaClient.historyDiagMatch(in: slice)
         XCTAssertNotNil(diag)
-        XCTAssertEqual(diag?.match, "cost:98711933", "首个 cost: 匹配应来自 total_cost 字段")
-        XCTAssertTrue(diag?.ctx.contains("total_") ?? false, "上下文应暴露匹配来自 total_cost")
+        XCTAssertEqual(diag?.match, "cost:0.0123", "词边界锚定后不应再从 total_cost 抢值")
+        XCTAssertTrue(diag?.ctx.contains("total_") ?? false, "上下文应保留 total_cost 现场")
         XCTAssertTrue(diag?.ctx.contains("0.0123") ?? false)
     }
 
-    func testParseHistoryBodyWritesDiagForAnomalousCost() throws {
-        let dir = makeTempDir("anomalous")
-        // total_cost 在 cost 之前:正则 cost:\s*\d+ 会优先命中 total_cost 的 98711933
+    func testParseHistoryBodyReproductionFixtureParsesTrueCost() throws {
+        let dir = makeTempDir("b29-fixture")
+        // b29 复现 98M 的原始 fixture 原样保留:total_cost 在 cost 之前。
+        // 修复前 cost 正则抢匹配 total_cost → 98,711,933;
+        // 词边界锚定后应解析真实小值 0.0123(阈值 5 内 → 不写诊断日志)
         let body = """
         const data1 = { id:"usg_Cross1", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, total_cost:98711933, cost:0.0123, keyID:"key_1", sessionID:"ses_1", plan:null };
         """
@@ -333,17 +336,32 @@ final class QuotaClientTests: XCTestCase {
         let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
 
         XCTAssertEqual(items.count, 1)
-        XCTAssertEqual(items[0].cost, 98_711_933, accuracy: 0.001,
-                       "historyDouble 与诊断用同一正则:异常值已解析为天文数字")
+        XCTAssertEqual(items[0].cost, 0.0123, accuracy: 0.0001,
+                       "词边界锚定后 total_cost 不再抢匹配,cost 应解析为真实小值")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent("history.log").path),
+            "0.0123 低于阈值,不应写诊断日志")
+    }
+
+    func testParseHistoryBodyDiagStillWritesForGenuineAnomalousCost() throws {
+        let dir = makeTempDir("genuine-anomaly")
+        // 诊断旁路覆盖保留:真实独立的 cost 字段(非子串)超过阈值 → 照常写日志,格式不变
+        let body = """
+        const data1 = { id:"usg_Cross2", timeCreated:new Date("2026-08-24T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:98711933, keyID:"key_1", sessionID:"ses_1", plan:null };
+        """
+
+        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].cost, 98_711_933, accuracy: 1)
 
         let logURL = dir.appendingPathComponent("history.log")
         XCTAssertTrue(FileManager.default.fileExists(atPath: logURL.path))
         let content = try String(contentsOf: logURL, encoding: .utf8)
-        XCTAssertTrue(content.contains("id=usg_Cross1"))
+        XCTAssertTrue(content.contains("id=usg_Cross2"))
         XCTAssertTrue(content.contains("model=gpt-test"))
         XCTAssertTrue(content.contains("cost=98711933.0"))
         XCTAssertTrue(content.contains("match=cost:98711933"), "应记录原始匹配串")
-        XCTAssertTrue(content.contains("total_cost"), "ctx 应包含匹配处上下文")
     }
 
     func testParseHistoryBodySkipsDiagBelowThreshold() throws {
@@ -353,6 +371,84 @@ final class QuotaClientTests: XCTestCase {
 
         XCTAssertEqual(items.count, 2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("history.log").path))
+    }
+
+    // MARK: 词边界锚定(98M 病根修复回归)
+
+    /// 构造含 cost 子串前置字段的 fixture,断言真实 cost 字段不被抢匹配
+    func testParseHistoryBodyIgnoresSubstringCostPrefixedFields() throws {
+        let dir = makeTempDir("substring-cost")
+        // 核心回归:b29 实锤形态 —— total_cost 在 cost 之前且值巨大。
+        // 词边界锚定前 cost 正则抢匹配 → 80 万级错值;锚定后应取真实 cost。
+        // 变体:totalCost(camelCase,大小写敏感本就不匹配)不误伤、
+        //       totalcost(全小写子串)同样被边界拦截
+        let body = """
+        const data1 = { id:"usg_Cost1", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, total_cost:98711933, cost:0.0019, keyID:"key_1", sessionID:"ses_1", plan:null };
+        const data2 = { id:"usg_Cost2", timeCreated:new Date("2026-08-23T01:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, totalCost:98711933, cost:0.0027, keyID:"key_2", sessionID:"ses_2", plan:null };
+        const data3 = { id:"usg_Cost3", timeCreated:new Date("2026-08-23T02:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, totalcost:98711933, cost:0.0035, keyID:"key_3", sessionID:"ses_3", plan:null };
+        """
+
+        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+
+        XCTAssertEqual(items.count, 3)
+        XCTAssertEqual(items[0].cost, 0.0019, accuracy: 0.0001, "total_cost 不应抢匹配")
+        XCTAssertEqual(items[1].cost, 0.0027, accuracy: 0.0001, "camelCase totalCost 不误伤")
+        XCTAssertEqual(items[2].cost, 0.0035, accuracy: 0.0001, "全小写 totalcost 同样被拦截")
+    }
+
+    func testParseHistoryBodyIgnoresSubstringKeyIDField() throws {
+        let dir = makeTempDir("substring-keyid")
+        // keyID 同病根变体:apikeyID 含 keyID: 子串,修复前会抢匹配到 key_wrong
+        let body = """
+        const data1 = { id:"usg_Key1", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:0.01, apikeyID:"key_wrong", keyID:"key_right", sessionID:"ses_1", plan:null };
+        """
+
+        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].keyID, "key_right", "keyID 不应从 apikeyID 抢匹配")
+    }
+
+    func testParseHistoryBodyAnchorIgnoresSubstringUidField() throws {
+        let dir = makeTempDir("substring-uid")
+        // anchor 同病根变体:uid:"usg_..." 含 id:"usg_..." 子串,
+        // 修复前会在 uid 处切出伪记录;词边界锚定后只认独立的 id: 字段
+        let body = """
+        const data1 = { uid:"usg_fake", id:"usg_Real1", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:0.01, keyID:"key_1", sessionID:"ses_1", plan:null };
+        """
+
+        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+
+        XCTAssertEqual(items.count, 1, "uid 处的伪锚点不应产生记录")
+        XCTAssertEqual(items[0].id, "usg_Real1")
+    }
+
+    func testParseHistoryBodyCostDefaultsToZeroWhenMissing() throws {
+        let dir = makeTempDir("no-cost")
+        // 无 cost 字段 → 默认 0(既有语义,锚定前后不变)
+        let body = """
+        const data1 = { id:"usg_NoCost", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, keyID:"key_1", sessionID:"ses_1", plan:null };
+        """
+
+        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].cost, 0, "无 cost 字段时应默认 0")
+    }
+
+    func testParseHistoryBodyTruncatesRecordAt4000Chars() throws {
+        let dir = makeTempDir("truncate")
+        // 单条记录扫描上限 4000 字符:截断点之前的字段正常解析,不崩溃(既有语义)
+        let padding = String(repeating: "x", count: 4200)
+        let body = """
+        const data1 = { id:"usg_Trunc", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:0.01, keyID:"key_1", sessionID:"ses_1", plan:null, padding:"\(padding)" };
+        """
+
+        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].id, "usg_Trunc")
+        XCTAssertEqual(items[0].cost, 0.01, accuracy: 0.0001)
     }
 
     // MARK: 校验
