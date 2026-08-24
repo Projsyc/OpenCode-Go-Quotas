@@ -1,0 +1,19 @@
+{
+  "_comment": "claude-boss-workflow 适配配置(OpenCodeGo SwiftUI macOS 应用)。无远程仓库:dev 只本地合并,不 push;main 只留基线。门禁 = swift build + swift test(需完整 Xcode)+ diff 检查。",
+  "workflow_root": ".claude/boss",
+  "parallel_sessions_dir": ".claude/boss/parallel-sessions",
+  "quality_scans_dir": ".claude/boss/quality-scans",
+  "worktree_prefix": ".claude/worktrees/dm-wt-",
+  "main_branch": "main",
+  "integrate_branch": "dev",
+  "gates": [
+    "swift build 2>&1 | tail -3",
+    "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test 2>&1 | tail -5",
+    "git diff --check"
+  ],
+  "design_system_skills": [],
+  "design_style": "Apple 原生 SwiftUI(macOS 14+):毛玻璃材质(ultraThinMaterial)、渐变仪表环、连续圆角、精致排版;保持现有视觉语义,只做增强",
+  "env_only": [
+    "swift run OpenCodeGo"
+  ]
+}
