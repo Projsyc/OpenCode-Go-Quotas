@@ -92,8 +92,10 @@ struct KeychainHelper: KeychainStoring {
     // MARK: - 免提示访问 ACL
 
     /// 候选可执行路径:当前运行路径 + /Applications 安装路径(dmg 安装后 ACL 仍匹配)。
-    /// 路径匹配而非签名身份(ad-hoc 重签名/重建后「始终允许」仍有效);多路径同时
-    /// 覆盖 dev 运行与 /Applications 安装版。
+    /// 注意:「可信应用」的匹配需求取自**该路径下代码的签名需求**(ad-hoc 时即 CDHash,
+    /// 每次重签名都会变 —— b17 曾假设「路径匹配与签名无关」,已被实测推翻);分发构建
+    /// 必须用稳定的「OpenCodeGo Dev」证书身份签名,需求才跨版本稳定(见 build-dmg.sh)。
+    /// 多路径同时覆盖 dev 运行与 /Applications 安装版。
     static func trustedExecutablePaths() -> [String] {
         var paths = [String]()
         if let cur = Bundle.main.executablePath { paths.append(cur) }
@@ -106,6 +108,8 @@ struct KeychainHelper: KeychainStoring {
     /// 中每个候选路径都作为可信应用 —— 经 dmg 安装到 /Applications 后,ACL 里的
     /// 项与当前运行路径同属候选列表,免提示访问仍匹配。单项创建失败 → 跳过;
     /// 全部失败 → 返回 nil,调用方降级为系统默认 ACL(每次询问),保证能写入优先。
+    /// 前提:二进制用「OpenCodeGo Dev」证书身份签名(见 CLAUDE.md 签名约定),
+    /// 否则 ad-hoc 重签名一次即要求重新授予一次。
     static func selfAccess() -> SecAccess? {
         var trustedApps: [SecTrustedApplication] = []
         for path in trustedExecutablePaths() {

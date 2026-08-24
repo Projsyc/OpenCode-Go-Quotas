@@ -48,6 +48,14 @@ swift run OpenCodeGo                                                  # ⚠️ �
 - 结构体 `Codable/Identifiable/Sendable/Equatable` + 显式 init(与现有 Models 一致)
 - 单测:URLProtocol mock(网络)、内存 mock(Keychain)、RFC 向量(TOTP)
 
+## 签名约定(钥匙串免提示的前提,勿违反)
+
+- **分发/交付构建必须用「OpenCodeGo Dev」证书身份签名**(`codesign --force --deep -s "OpenCodeGo Dev"`;身份在登录钥匙串,p12 备份在 `~/Desktop/OpenCodeGo-Dev.p12`,密码不落仓库)。
+- 原因:钥匙串 ACL 的可信应用需求取自二进制签名(ad-hoc 时即 CDHash,**每次重签名都会失效**);
+  证书身份的需求稳定跨版本,ACL 不会随更新失效 → 免弹窗。
+- `tools/build-dmg.sh` 已内置「有身份用身份,无身份退回 ad-hoc」;手动交付时遵循同一逻辑。
+- b17 曾假设路径匹配与签名无关,已被实测推翻(见 KeychainHelper.swift 注释)。
+
 ## Boss 流水线(claude-boss-workflow)
 
 - 本仓库已装 boss-workflow:Boss 编排、worker 在 `.claude/worktrees/dm-wt-<ws>` 写代码、
