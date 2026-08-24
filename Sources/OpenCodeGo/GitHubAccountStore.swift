@@ -35,37 +35,68 @@ enum GitHubAccountStoreError: LocalizedError, Equatable {
 @Observable
 final class GitHubAccountStore {
     private(set) var accounts: [GitHubAccount] = []
+    /// 演示模式(启动参数 --demo 或注入):内存 Keychain + 内存存储,不落盘、不碰真实数据
+    private(set) var demoMode = false
 
     private let keychain: KeychainStoring
     private let fileURL: URL
 
+    /// - Parameters:
+    ///   - keychain: nil → KeychainHelper(service: "com.acccan.opencode-go.github")
+    ///   - fileURL: nil → Application Support/OpenCodeGo/github-accounts.json
+    ///   - demoMode: nil → 按启动参数是否含 --demo 判断
     init(
-        keychain: KeychainStoring = KeychainHelper(service: "com.acccan.opencode-go.github"),
-        fileURL: URL? = nil   // 缺省 = Application Support/OpenCodeGo/github-accounts.json
+        keychain: KeychainStoring? = nil,
+        fileURL: URL? = nil,
+        demoMode: Bool? = nil
     ) {
-        self.keychain = keychain
-        if let fileURL {
-            self.fileURL = fileURL
+        let demo = demoMode ?? ProcessInfo.processInfo.arguments.contains("--demo")
+        self.demoMode = demo
+        self.fileURL = fileURL ?? Self.defaultFileURL()
+        if demo {
+            let mock = InMemoryKeychain()
+            self.keychain = mock
+            setupDemo(using: mock)
         } else {
-            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            self.fileURL = support
-                .appendingPathComponent("OpenCodeGo", isDirectory: true)
-                .appendingPathComponent("github-accounts.json")
+            self.keychain = keychain ?? KeychainHelper(service: "com.acccan.opencode-go.github")
+            load()
         }
-        load()
+    }
+
+    private static func defaultFileURL() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return support
+            .appendingPathComponent("OpenCodeGo", isDirectory: true)
+            .appendingPathComponent("github-accounts.json")
+    }
+
+    /// 演示数据:3 个假账号(不同凭据类型),密码/凭据只进内存 mock
+    private func setupDemo(using mock: InMemoryKeychain) {
+        let totp = GitHubAccount(username: "demo-totp", notes: "演示账号(TOTP)", credentialKind: .totpSecret)
+        let code = GitHubAccount(username: "demo-code", notes: "演示账号(一次性验证码)", credentialKind: .oneTimeCode, lastCodeAt: Date())
+        let pwd = GitHubAccount(username: "demo-pwd", notes: "演示账号(仅密码)", credentialKind: nil)
+        for account in [totp, code, pwd] {
+            try? mock.set("demo-pass-123456", forKey: key("password", account.id))
+        }
+        try? mock.set("JBSWY3DPEHPK3PXP", forKey: key("credential", totp.id))
+        try? mock.set("123456", forKey: key("credential", code.id))
+        accounts = [totp, code, pwd]
     }
 
     // MARK: - 持久化
 
-    /// 幂等加载:JSON 不存在或解码失败时静默为空数组
+    /// 幂等加载:JSON 不存在或解码失败时静默为空数组;demo 模式不读盘(数据为预置假账号)
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
+        guard !demoMode,
+              let data = try? Data(contentsOf: fileURL),
               let decoded = try? JSONDecoder().decode([GitHubAccount].self, from: data)
         else { return }
         accounts = decoded
     }
 
+    /// demo 模式不落盘(内存存储)
     private func save() {
+        guard !demoMode else { return }
         try? FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
@@ -151,6 +182,16 @@ final class GitHubAccountStore {
         keychain.delete(key("password", id))
         keychain.delete(key("credential", id))
         accounts.remove(at: i)
+        save()
+    }
+
+    /// 清除已存的凭据(TOTP secret 或一次性验证码);密码不受影响
+    func clearCredential(_ id: UUID) throws {
+        guard let i = accounts.firstIndex(where: { $0.id == id }) else { return }
+        keychain.delete(key("credential", id))
+        accounts[i].credentialKind = nil
+        accounts[i].lastCodeAt = nil
+        accounts[i].updatedAt = Date()
         save()
     }
 
