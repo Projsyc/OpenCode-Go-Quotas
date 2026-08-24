@@ -1,11 +1,14 @@
+import AppKit
 import SwiftUI
 
 /// 现代化账号卡片:头像 + 套餐 + 三档额度仪表环(Rolling/Weekly/Monthly)+ 操作
 struct AccountCardView: View {
     @Environment(AccountStore.self) private var store
+    @Environment(\.colorScheme) private var scheme
     let account: Account
 
     @State private var refreshing = false
+    @State private var refreshSpin = false
     @State private var showingHistory = false
     @State private var showingEdit = false
     @State private var confirmingDelete = false
@@ -29,10 +32,17 @@ struct AccountCardView: View {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .lineLimit(2)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 10).fill(.red.opacity(0.10)))
+                    .contentShape(RoundedRectangle(cornerRadius: 10))
+                    .onTapGesture {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(error, forType: .string)
+                    }
+                    .help("点击复制错误全文")
             }
             rings(account)
             Divider().opacity(0.5)
@@ -48,7 +58,7 @@ struct AccountCardView: View {
                             LinearGradient(
                                 colors: [Color.white.opacity(0.25), Color.primary.opacity(0.05)],
                                 startPoint: .topLeading, endPoint: .bottomTrailing)))
-                .shadow(color: .black.opacity(hovering ? 0.18 : 0.08), radius: hovering ? 16 : 10, y: 5))
+                .shadow(color: .black.opacity(hovering ? 0.15 : 0.08), radius: hovering ? 20 : 10, y: 5))
         .scaleEffect(hovering ? 1.012 : 1)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hovering)
         .onHover { hovering = $0 }
@@ -119,28 +129,45 @@ struct AccountCardView: View {
     // MARK: - 三档额度仪表环
 
     private func rings(_ account: Account) -> some View {
-        HStack(spacing: 12) {
+        let rolling = account.usage?.rolling
+        let weekly = account.usage?.weekly
+        let monthly = account.usage?.monthly
+        return HStack(spacing: 12) {
             GaugeRing(
                 title: "Rolling",
-                percent: account.usage?.rolling?.usagePercent ?? 0,
-                resetText: resetText(account.usage?.rolling?.resetInSec),
-                color: Color(hex: 0x5B8DEF),
+                percent: rolling?.usagePercent ?? 0,
+                resetText: resetText(rolling?.resetInSec),
+                color: ringColor(base: Color(hex: 0x5B8DEF), window: rolling),
+                textColor: textColor(for: rolling),
                 size: 76)
             GaugeRing(
                 title: "Weekly",
-                percent: account.usage?.weekly?.usagePercent ?? 0,
-                resetText: resetText(account.usage?.weekly?.resetInSec),
-                color: Color(hex: 0x8B5CF6),
+                percent: weekly?.usagePercent ?? 0,
+                resetText: resetText(weekly?.resetInSec),
+                color: ringColor(base: Color(hex: 0x8B5CF6), window: weekly),
+                textColor: textColor(for: weekly),
                 size: 76)
             GaugeRing(
                 title: "Monthly",
-                percent: account.usage?.monthly?.usagePercent ?? 0,
-                resetText: resetText(account.usage?.monthly?.resetInSec),
-                color: Color(hex: 0xEC6EAD),
+                percent: monthly?.usagePercent ?? 0,
+                resetText: resetText(monthly?.resetInSec),
+                color: ringColor(base: Color(hex: 0xEC6EAD), window: monthly),
+                textColor: textColor(for: monthly),
                 size: 76)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// 有真实额度数据时按使用率取语义色(≤60% 绿 / ≤85% 橙 / >85% 红),否则保持窗口主题色
+    private func ringColor(base: Color, window: UsageWindow?) -> Color {
+        guard let window else { return base }
+        return Theme.levelColor(window.usagePercent, scheme: scheme)
+    }
+
+    /// 数字颜色:同语义色;无数据时 nil(保持默认主色)
+    private func textColor(for window: UsageWindow?) -> Color? {
+        window.map { Theme.levelColor($0.usagePercent, scheme: scheme) }
     }
 
     private func resetText(_ seconds: Double?) -> String {
@@ -162,11 +189,13 @@ struct AccountCardView: View {
 
     private func footbar(_ account: Account) -> some View {
         HStack(spacing: 4) {
-            iconButton("arrow.clockwise", help: "刷新额度") {
+            iconButton("arrow.clockwise", help: refreshing ? "刷新中…" : "刷新额度", spinning: refreshSpin) {
                 Task {
+                    refreshSpin = true
                     refreshing = true
                     await store.refresh(account)
                     refreshing = false
+                    refreshSpin = false
                 }
             }
             .disabled(refreshing)
@@ -187,12 +216,19 @@ struct AccountCardView: View {
     }
 
     private func iconButton(_ systemImage: String, help: String, destructive: Bool = false,
+                            spinning: Bool = false,
                             action: @escaping () -> Void) -> some View {
         Button(role: destructive ? .destructive : nil, action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 12, weight: .medium))
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(Color.primary.opacity(0.06)))
+                .rotationEffect(.degrees(spinning ? 360 : 0))
+                .animation(
+                    spinning
+                        ? .linear(duration: 0.8).repeatForever(autoreverses: false)
+                        : .spring(response: 0.4, dampingFraction: 0.7),
+                    value: spinning)
         }
         .buttonStyle(.plain)
         .help(help)
