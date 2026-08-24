@@ -178,6 +178,16 @@ struct QuotaClient: Sendable {
     /// 全小写 `totalcost:` 与下划线变体。所有 history 字段正则(含诊断旁路)统一走此前缀。
     private static let historyFieldBoundary = #"(?<![A-Za-z0-9_])"#
 
+    // MARK: - history cost 单位缩放(98M 之谜根因)
+
+    /// 平台把 history 记录的 `cost` 字段从「美元」改成了 ×10⁸ 定点单位:
+    /// cost × 10⁻⁸ = 美元。取证(用户对照,b30):真实 $0.0019 ↔ 记录 194958
+    /// (=0.00194958),真实合计 ≈$0.99 ↔ 记录 98,711,933;各条 10⁴~10⁶ 量级对应
+    /// 200-250K token 的极低价 flash 调用 ×10⁻⁸ = $0.002~0.005,量级自洽。
+    /// 原项目(1:1 移植来源)未同步此单位变更,故同病。缩放只在解析层一次到位,
+    /// UI 层(今日/周/月/合计、表格、fmtCost)零改动;token 计数类字段不缩放。
+    static let historyCostScale = 1e-8
+
     /// 调用 opencode.ai/_server RPC 抓取 Usage 页面数据,解析出逐请求用量记录
     func fetchGoUsageHistory(
         workspaceId: String,
@@ -239,7 +249,8 @@ struct QuotaClient: Sendable {
 
     // MARK: - 用量历史 cost 诊断(98M 之谜取证)
 
-    /// 诊断阈值:单条记录 cost 超过 $5 视为异常(正常单次请求 cost 远低于此)
+    /// 诊断阈值:单条记录 cost(缩放后美元值,与 UI 显示一致)超过 $5 视为异常
+    /// (正常单次请求 cost 远低于此;平台原始定点值需 ×10⁻⁸ 后与阈值比较)
     static let historyDiagCostThreshold = 5.0
     /// 诊断上下文半径:匹配串两侧各取多少字符(字符数)
     static let historyDiagContextRadius = 60
@@ -298,7 +309,9 @@ struct QuotaClient: Sendable {
             let outputTokens = Self.historyInt("outputTokens", in: slice)
             let reasoningTokens = Self.historyInt("reasoningTokens", in: slice)
             let cacheReadTokens = Self.historyInt("cacheReadTokens", in: slice)
-            let cost = Self.historyDouble("cost", in: slice)
+            // 平台原始定点值(×10⁸ 单位,未缩放),需缩放到美元;原始值同时供诊断取证
+            let costRaw = Self.historyDouble("cost", in: slice)
+            let cost = costRaw * Self.historyCostScale
             let keyID = RX.capture(#"\#(Self.historyFieldBoundary)keyID:\s*"([^"]*)""#, in: slice) ?? ""
             let sessionID = RX.capture(#"\#(Self.historyFieldBoundary)sessionID:\s*"([^"]*)""#, in: slice) ?? ""
             let plan = RX.capture(#"\#(Self.historyFieldBoundary)plan:\s*"([^"]*)""#, in: slice)
@@ -319,13 +332,14 @@ struct QuotaClient: Sendable {
                 sessionID: sessionID,
                 plan: plan))
 
-            // 诊断旁路(纯旁路,不影响解析结果):cost 异常(> $5)时把原始匹配串与
-            // 上下文写入 history.log,用于排查「cost 正则匹配到其它字段/嵌套对象数值」
-            // 类问题(历史曾见合计费用 US$98,711,933)。只含 id/model/cost/上下文,
-            // 不含任何凭据;写失败静默。
+            // 诊断旁路(纯旁路,不影响解析结果):缩放后美元 cost 异常(> $5)时把原始
+            // 匹配串与上下文写入 history.log,用于排查「cost 正则匹配到其它字段/嵌套对象
+            // 数值」类问题(历史曾见合计费用 US$98,711,933)。诊断记录平台**原始未缩放**
+            // 值并标注 costRaw(诊断目的 = 取证原始数据),避免与 UI 显示(缩放后美元)混淆;
+            // 只含 id/model/costRaw/上下文,不含任何凭据;写失败静默。
             if cost > Self.historyDiagCostThreshold,
                let (match, ctx) = Self.historyDiagMatch(in: slice) {
-                diag.append("id=usg_\(idRaw) model=\(model) cost=\(cost) match=\(match) ctx=\(ctx)")
+                diag.append("id=usg_\(idRaw) model=\(model) costRaw=\(costRaw) match=\(match) ctx=\(ctx)")
             }
         }
         return items
