@@ -3,7 +3,7 @@
 把 [Ruinique/opencode-go-dashboard](https://github.com/Ruinique/opencode-go-dashboard) 改造成的原生 Swift 应用。
 现代化 SwiftUI 界面(SVG 装饰 + 渐变仪表环):每个 opencode 账号展示 **Rolling / Weekly / Monthly** 三档用量与重置倒计时,附逐请求用量历史(今日 / 本周 / 本月 / 全部)。
 
-同时内置 **GitHub 多账号管理**:批量导入、TOTP 验证码生成、Keychain 安全存储,集中管理登录 opencode.ai 用的 GitHub 账号凭据(opencode.ai 支持 GitHub OAuth 登录,导入的即登录凭据;从 GitHub 一键自动登录的桥接在后续版本提供)。
+同时内置 **GitHub 多账号管理**:批量导入、TOTP 验证码生成、Keychain 安全存储,并支持用 GitHub 账号一键自动登录 opencode.ai、自动捕获 auth Cookie。
 
 数据获取逻辑与原项目 **1:1 移植**(`Sources/OpenCodeGo/QuotaClient.swift` 对应原 `src/worker/quota.ts`):
 - 额度:GET `https://opencode.ai/workspace/{ws}/go`,解析页面内嵌的 `rollingUsage/weeklyUsage/monthlyUsage/plan`
@@ -35,9 +35,10 @@
 - 密码与 TOTP secret / 一次性验证码**只存 Keychain**(service `com.acccan.opencode-go.github`),不落盘、不打印、不上传
 - 元数据 JSON(`github-accounts.json`)只有用户名/备注/凭据类型等非敏感字段
 
-### 后续规划
+### 一键自动登录
 
-- 从 GitHub 账号一键登录 opencode.ai、自动获取 auth Cookie(见「已知限制」)
+- 用已导入的 GitHub 账号在应用内完成 opencode.ai 登录:自动填用户名/密码、自动输入 TOTP 验证码、自动点授权,捕获 auth Cookie 后填入账号表单(操作步骤见「使用」)
+- 需要所选账号的密码已保存;开启两步验证的账号请先保存 TOTP 密钥或一次性验证码
 
 ## 安全设计
 
@@ -76,15 +77,22 @@ open dist/OpenCodeGo.app
 3. 单个账号:「添加账号」→ 填用户名、密码(可显隐)、验证码/TOTP 密钥(6 位数字按一次性验证码,其余按 base32 TOTP 密钥识别)、备注
 4. 卡片上点「复制验证码」/「复制密码」直接取用;TOTP 密钥账号实时显示当前 6 位验证码与 30 秒倒计时;一次性验证码显示 60 秒失效倒计时,过期显示「已失效」
 
+### GitHub 一键登录 opencode.ai
+
+1. 「添加账号」(或编辑已有 opencode 账号)→ 在「用 GitHub 账号自动登录」区选择 GitHub 账号
+2. 点「开始自动登录」,应用在独立窗口内自动完成:打开 opencode.ai → 跳转 GitHub 登录 → 自动填用户名/密码 → 自动输入 TOTP 验证码(未保存验证码时提示手动输入)→ 自动点「Authorize」
+3. 捕获 opencode auth Cookie 后自动填入表单 → 点「保存」完成
+
 ## 测试
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
-58 个单测覆盖:额度/历史解析(URLProtocol mock)、cookie 解密 round-trip(本地构造 Chrome 127+ 加密样本)、
+92 个单测覆盖:额度/历史解析(URLProtocol mock)、cookie 解密 round-trip(本地构造 Chrome 127+ 加密样本)、
 TOTP 生成(RFC 6238 向量 + base32 变体 + 倒计时边界)、GitHub 批量导入解析(分隔符/引号/凭据类型推断)、
-GitHub 账号存储(内存 Keychain mock,读写/去重/导入摘要)、导入预览行级解析(无效行不阻塞)。
+GitHub 账号存储(内存 Keychain mock,读写/去重/导入摘要)、导入预览行级解析(无效行不阻塞)、
+GitHub 自动登录状态机(URL→决策/JS 转义/cookie 提取)、demo 隔离与凭据清除。
 
 ## 与原项目的差异
 
@@ -98,9 +106,9 @@ GitHub 账号存储(内存 Keychain mock,读写/去重/导入摘要)、导入预
 ## 已知限制
 
 - opencode.ai 页面结构变更后解析逻辑需同步更新(与原项目相同)
-- Cookie 过期需重新导入或复制更新(应用会明确提示)
+- Cookie 过期时应用会明确提示;可用 GitHub 一键自动登录重登,或重新导入/复制更新
 - 一次性验证码 60 秒后失效,需重新导入或编辑更新(应用会明确提示)
-- GitHub → opencode.ai 一键自动登录未做:目前 GitHub 凭据由用户自行管理,后续版本提供从 GitHub 账号登录 opencode.ai 并自动获取 auth Cookie 的桥接
+- GitHub 一键自动登录依赖已保存的密码与 TOTP 密钥/一次性验证码:未保存时需手动在登录窗口内完成;GitHub 通行密钥、设备验证与风控页面同样需手动处理
 - GitHub 凭据仅存本机 Keychain,更换设备需重新导入
 - 仅 macOS 14+
 - 浏览器 Cookie 需为持久化 Cookie 才会落盘;若在隐私模式下登录则可能读不到
