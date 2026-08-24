@@ -156,7 +156,8 @@ struct GitHubAccountCardView: View {
                     .help("点击复制验证码")
                 }
             } else {
-                Text("读取 TOTP 密钥…")
+                // keychain 缺凭据(显示「读取中…」是误导,数据不一致时永久挂着)
+                Text("未找到密钥")
                     .font(.callout)
                     .foregroundStyle(.tertiary)
                     .padding(.vertical, 6)
