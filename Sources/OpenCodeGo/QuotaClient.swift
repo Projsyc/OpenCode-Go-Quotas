@@ -43,6 +43,17 @@ private enum RX {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         return regex.matches(in: s, range: NSRange(s.startIndex..., in: s)).map(\.range)
     }
+
+    /// 首个匹配:返回完整匹配串(正则整体,含捕获组之外的部分)与对应 Range
+    static func firstFullMatch(
+        _ pattern: String, in s: String
+    ) -> (text: String, range: Range<String.Index>)? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: s, range: NSRange(s.startIndex..., in: s))
+        else { return nil }
+        guard let r = Range(match.range, in: s) else { return nil }
+        return (String(s[r]), r)
+    }
 }
 
 // MARK: - OpenCode Go 额度客户端
@@ -217,8 +228,41 @@ struct QuotaClient: Sendable {
         return items.sorted { $0.timeCreated > $1.timeCreated }
     }
 
+    // MARK: - 用量历史 cost 诊断(98M 之谜取证)
+
+    /// 诊断阈值:单条记录 cost 超过 $5 视为异常(正常单次请求 cost 远低于此)
+    static let historyDiagCostThreshold = 5.0
+    /// 诊断上下文半径:匹配串两侧各取多少字符(字符数)
+    static let historyDiagContextRadius = 60
+
+    /// 纯函数:截取 text 中 [center] 两侧各 radius 字符(越界自动收敛),
+    /// 并把换行/回车转义为字面 \n / \r(防日志串行)。诊断旁路专用。
+    static func diagContext(
+        in text: String, around center: Range<String.Index>, radius: Int = 60
+    ) -> String {
+        let lower = text.index(center.lowerBound, offsetBy: -radius, limitedBy: text.startIndex)
+            ?? text.startIndex
+        let upper = text.index(center.upperBound, offsetBy: radius, limitedBy: text.endIndex)
+            ?? text.endIndex
+        return String(text[lower..<upper])
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\n", with: "\\n")
+    }
+
+    /// 诊断:返回 slice 中 cost 正则首个完整匹配串,及该匹配两侧各
+    /// historyDiagContextRadius 字符的上下文(换行已转义)。无匹配返回 nil。
+    static func historyDiagMatch(in slice: String) -> (match: String, ctx: String)? {
+        guard let m = RX.firstFullMatch(#"cost:\s*(\d+(?:\.\d+)?)"#, in: slice) else { return nil }
+        return (
+            m.text,
+            diagContext(in: slice, around: m.range, radius: historyDiagContextRadius))
+    }
+
     /// 响应体是 SolidStart 序列化数据:每条记录以 id:"usg_xxx" 为锚点切块,逐字段正则提取
-    static func parseHistoryBody(_ body: String) -> [UsageHistoryItem] {
+    /// - Parameter diag: cost 异常诊断输出(测试注入临时目录;默认 ~/Library/Logs/OpenCodeGo/history.log)
+    static func parseHistoryBody(
+        _ body: String, diag: HistoryDiagSink = HistoryDiagSink()
+    ) -> [UsageHistoryItem] {
         let anchorPattern = #"id:\s*"usg_[A-Za-z0-9]+""#
         let anchors = RX.allRanges(anchorPattern, in: body)
         guard !anchors.isEmpty else { return [] }
@@ -262,6 +306,15 @@ struct QuotaClient: Sendable {
                 keyID: keyID,
                 sessionID: sessionID,
                 plan: plan))
+
+            // 诊断旁路(纯旁路,不影响解析结果):cost 异常(> $5)时把原始匹配串与
+            // 上下文写入 history.log,用于排查「cost 正则匹配到其它字段/嵌套对象数值」
+            // 类问题(历史曾见合计费用 US$98,711,933)。只含 id/model/cost/上下文,
+            // 不含任何凭据;写失败静默。
+            if cost > Self.historyDiagCostThreshold,
+               let (match, ctx) = Self.historyDiagMatch(in: slice) {
+                diag.append("id=usg_\(idRaw) model=\(model) cost=\(cost) match=\(match) ctx=\(ctx)")
+            }
         }
         return items
     }
