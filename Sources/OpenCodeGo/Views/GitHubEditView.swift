@@ -61,6 +61,14 @@ struct GitHubEditView: View {
                      : "密码至少 6 个字符,仅保存在本机 Keychain")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                // ghatips:密码含首尾空白时保存会被 trim(可能是另一个密码)→ 输入阶段
+                // 实时提示,避免「trim 后静默变错密码、登录失败且用户不知情」
+                if passwordHintVisible {
+                    Label("密码含首尾空白,保存时会自动去除(如密码本身以空格开头/结尾,请确认)",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
                 TextField("验证码 / TOTP 密钥(可选)", text: $credential)
                     .textFieldStyle(.roundedBorder)
@@ -140,6 +148,18 @@ struct GitHubEditView: View {
     }
 
     // MARK: - 表单
+
+    /// 密码是否含首尾空白(保存时会按现有行为 trim;纯函数,供实时提示判定/单测):
+    /// GitHub 密码技术上可含首尾空格,trim 后是另一个密码 —— 保存前提示用户知情。
+    /// trim 后为空的纯空白密码不算(由「密码至少 6 个字符」校验兜底)。
+    static func passwordContainsEdgeWhitespace(_ password: String) -> Bool {
+        let trimmed = password.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && trimmed != password
+    }
+
+    private var passwordHintVisible: Bool {
+        Self.passwordContainsEdgeWhitespace(password)
+    }
 
     private func prefill() {
         guard let account else { return }
