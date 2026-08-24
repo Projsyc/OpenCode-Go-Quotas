@@ -165,8 +165,57 @@ final class AccountStore {
         }
     }
 
+    /// 并行刷新全部账号:每个账号一个 TaskGroup 子任务并发抓取(总耗时 ≈ 最慢单个账号,
+    /// 而非串行之和),聚合后回到主线程统一按 id 写回,且只落盘一次。
+    /// 子任务只返回 (id, usage, error) 元组,不触碰 accounts,天然避免跨线程数据竞争。
     func refreshAll() async {
-        for account in accounts { await refresh(account) }
+        // demo 模式无网络请求,保持原串行行为(逐账号 demoRefresh,不落盘)
+        if demoMode {
+            for account in accounts { await refresh(account) }
+            return
+        }
+
+        // 主线程先取快照 + 读 Cookie;子任务只持 Sendable 的 client 与值类型快照
+        let client = self.client
+        let snapshot = accounts.map {
+            (id: $0.id, workspaceId: $0.workspaceId, cookie: keychain.get($0.id.uuidString))
+        }
+        var results: [(id: UUID, usage: UsageResult?, error: String?)] = []
+        results.reserveCapacity(snapshot.count)
+
+        await withTaskGroup(of: (UUID, UsageResult?, String?).self) { group in
+            for item in snapshot {
+                group.addTask {
+                    guard let cookie = item.cookie else {
+                        return (item.id, nil, "未找到 Cookie，请重新添加账号")
+                    }
+                    do {
+                        let usage = try await client.fetchGoQuota(
+                            workspaceId: item.workspaceId, authCookie: cookie)
+                        return (item.id, usage, nil)
+                    } catch {
+                        return (item.id, nil, error.localizedDescription)
+                    }
+                }
+            }
+            for await result in group {
+                results.append(result)
+            }
+        }
+
+        // 回到主线程:按 id 重查下标统一写回(账号可能已被删除 → 重查失败静默跳过),
+        // 全部写回后只 save() 一次,避免 N 次全量写盘
+        for (id, usage, error) in results {
+            guard let i = accounts.firstIndex(where: { $0.id == id }) else { continue }
+            if let usage {
+                accounts[i].usage = usage
+                accounts[i].updatedAt = Date()
+                accounts[i].usageError = nil
+            } else if let error {
+                accounts[i].usageError = error
+            }
+        }
+        save()
     }
 
     // MARK: - 用量历史

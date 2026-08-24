@@ -55,6 +55,47 @@ private enum TestKeychainError: Error {
     case writeFailed
 }
 
+/// 可控制交付时序的 URLProtocol(仅本文件测试用):
+/// startLoading 立即返回,响应体在后台队列等 gate 后交付——不阻塞 URLSession 的
+/// 协议加载队列,因此同一 session 可有多个请求同时在途(在 handler 里 gate.wait()
+/// 会串行化后续协议加载,无法复现「两个 fetch 同时挂起」的并行时序)。
+/// gates 按实例创建顺序消费:nil = 该请求立即交付;DispatchSemaphore = 交付前等待。
+private final class GatedURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (URLResponse, Data))?
+    nonisolated(unsafe) static var gates: [DispatchSemaphore?] = []
+    nonisolated(unsafe) static var startedExpectation: XCTestExpectation?
+    private static let lock = NSLock()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let gate = Self.gates.isEmpty ? nil : Self.gates.removeFirst()
+        Self.startedExpectation?.fulfill()
+        Self.lock.unlock()
+
+        let response: URLResponse
+        let data: Data
+        do {
+            guard let handler = Self.handler else { throw URLError(.badServerResponse) }
+            (response, data) = try handler(request)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            gate?.wait()
+            self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            self.client?.urlProtocol(self, didLoad: data)
+            self.client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 // MARK: - 测试
 
 /// H1:刷新/历史在途时删除账号 → 按 id 重查下标,不越界崩溃、不写错账号
@@ -65,6 +106,9 @@ final class AccountStoreConcurrencyTests: XCTestCase {
 
     override func tearDown() {
         MockURLProtocol.handler = nil
+        GatedURLProtocol.handler = nil
+        GatedURLProtocol.gates = []
+        GatedURLProtocol.startedExpectation = nil
         super.tearDown()
     }
 
@@ -76,6 +120,21 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let fileURL = dir.appendingPathComponent("accounts.json")
         let store = AccountStore(client: makeClient(), keychain: keychain, fileURL: fileURL)
+        return (store, fileURL, dir)
+    }
+
+    /// 用 GatedURLProtocol 的 store:可让多个请求同时在途并控制交付顺序
+    private func makeGatedTempStore() -> (store: AccountStore, fileURL: URL, dir: URL) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AccountStoreConcurrencyTests-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent("accounts.json")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [GatedURLProtocol.self]
+        let store = AccountStore(
+            client: QuotaClient(session: URLSession(configuration: config)),
+            keychain: InMemoryKeychain(),
+            fileURL: fileURL)
         return (store, fileURL, dir)
     }
 
@@ -340,5 +399,71 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         let disk = String(decoding: try Data(contentsOf: t.fileURL), as: UTF8.self)
         XCTAssertTrue(disk.contains("新名"))
         XCTAssertTrue(disk.contains("wrk_new"))
+    }
+
+    // MARK: - P1:refreshAll 并行化(TaskGroup)
+
+    /// 两个账号的 fetch 必须同时发起(并行):第一个到达的请求交付前挂起,
+    /// 第二个立即交付——先放行第二个再放行第一个,两者都成功写入。
+    /// 串行版第二个请求在第一个完成前不会发起,「两个都在途」等待会超时失败。
+    func testRefreshAllParallelizes() async throws {
+        let t = makeGatedTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        _ = try t.store.addAccount(name: "B", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        // 第一个实例的响应交付前挂起;第二个实例立即交付(先放行第二个再放行第一个)
+        let bothInFlight = XCTestExpectation(description: "两个 fetch 均已发起")
+        bothInFlight.expectedFulfillmentCount = 2
+        let firstGate = DispatchSemaphore(value: 0)
+        GatedURLProtocol.handler = { request in okResponse(request.url!, body: quotaHTML) }
+        GatedURLProtocol.gates = [firstGate, nil]
+        GatedURLProtocol.startedExpectation = bothInFlight
+
+        let task = Task { await t.store.refreshAll() }
+        await fulfillment(of: [bothInFlight], timeout: 5)
+
+        firstGate.signal() // 第二个早已交付返回,这里再放行第一个
+        await task.value
+
+        // 两个账号都成功写入(第二个先完成、第一个后完成,时序不影响结果)
+        XCTAssertEqual(t.store.accounts[0].usage?.rolling?.usagePercent ?? -1, 34.567, accuracy: 0.0001)
+        XCTAssertEqual(t.store.accounts[1].usage?.rolling?.usagePercent ?? -1, 34.567, accuracy: 0.0001)
+        XCTAssertNil(t.store.accounts[0].usageError)
+        XCTAssertNil(t.store.accounts[1].usageError)
+    }
+
+    /// 聚合写回后只 save 一次:第二个 fetch 完成后(第一个仍挂起)文件不得提前变化;
+    /// 全部完成后文件才更新且含两个账号的 usage(逐账号 save 实现会在聚合前落盘,此测试失败)
+    func testRefreshAllAggregatesSave() async throws {
+        let t = makeGatedTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        _ = try t.store.addAccount(name: "B", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        let bothInFlight = XCTestExpectation(description: "两个 fetch 均已发起")
+        bothInFlight.expectedFulfillmentCount = 2
+        let firstGate = DispatchSemaphore(value: 0)
+        GatedURLProtocol.handler = { request in okResponse(request.url!, body: quotaHTML) }
+        GatedURLProtocol.gates = [firstGate, nil]
+        GatedURLProtocol.startedExpectation = bothInFlight
+
+        let task = Task { await t.store.refreshAll() }
+        await fulfillment(of: [bothInFlight], timeout: 5)
+
+        // 阶段 1:第二个 fetch 已返回并处理完毕,第一个仍挂起。
+        // 聚合实现此时绝不落盘(逐结果 save 实现会在这时把 usage 写入文件)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let before = String(decoding: try Data(contentsOf: t.fileURL), as: UTF8.self)
+        XCTAssertFalse(before.contains("\"usage\""), "聚合完成前文件不得写入 usage,实际: \(before)")
+
+        firstGate.signal() // 放行第一个 → 全部完成
+        await task.value
+
+        // 阶段 2:全部完成后落盘一次,文件包含两个账号的 usage
+        let after = String(decoding: try Data(contentsOf: t.fileURL), as: UTF8.self)
+        XCTAssertTrue(after.contains("\"usage\""), "聚合后文件应含 usage,实际: \(after)")
+        XCTAssertTrue(after.contains("\"A\""))
+        XCTAssertTrue(after.contains("\"B\""))
     }
 }
