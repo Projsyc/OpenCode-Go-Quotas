@@ -50,6 +50,10 @@ struct GitHubLoginView: View {
     @State private var flowLog = GitHubLoginService.LoginFlowLog()
     /// 时间线已写入日志(避免同一流程重复输出,onDisappear 幂等兜底)
     @State private var flowLogDumped = false
+    /// 是否已到达 GitHub OAuth:opencode.ai 对**任何匿名访问**都会下发 auth=Fe26.
+    /// 开头的占位 cookie,未经过 GitHub 就把 Fe26. 判定为登录成功会捕获占位 → 虚假成功。
+    /// 门槛:导航曾到达 github.com(含子域,登录/OAuth 授权/2FA 页)才允许采信 auth cookie
+    @State private var reachedGitHubOAuth = false
 
     /// 统一日志(subsystem 固定,用户可用 `log show --predicate 'subsystem == "com.acccan.opencode-go"'` 提取)
     private let logger = Logger(subsystem: "com.acccan.opencode-go", category: "github-login")
@@ -230,6 +234,11 @@ struct GitHubLoginView: View {
     @MainActor
     private func handleNavigation(to url: URL?) {
         guard !succeeded else { return }
+        // 门槛:到达过 github.com(含子域)才允许把 auth cookie 判定为登录成功;
+        // 未到达前的 Fe26. cookie 是 opencode 对匿名访问下发的占位,轮询时必须忽略(见 pollCookies)
+        if isGitHubHost(url) {
+            reachedGitHubOAuth = true
+        }
         let previousStep = currentStep
 
         let decision = GitHubLoginService.decide(
@@ -278,6 +287,12 @@ struct GitHubLoginView: View {
         }
         // 其余注入(授权点击 / two-factor 页 OTP / 读 cookie):一次性注入,结果不解释
         injectOneShot(js: js)
+    }
+
+    /// URL host 是否为 github.com 或其子域(与 GitHubLoginService.decide 内部判断一致)
+    private func isGitHubHost(_ url: URL?) -> Bool {
+        guard let host = url?.host?.lowercased() else { return false }
+        return host == "github.com" || host.hasSuffix(".github.com")
     }
 
     // MARK: - 注入执行
@@ -418,7 +433,10 @@ struct GitHubLoginView: View {
         pollTimer = nil
     }
 
-    /// 从 WKHTTPCookieStore 轮询 opencode auth cookie(HttpOnly 也能读到);命中 → 成功
+    /// 从 WKHTTPCookieStore 轮询 opencode auth cookie(HttpOnly 也能读到);命中 → 成功。
+    /// 门槛(修复):opencode.ai 对匿名访问立即下发 auth=Fe26. 占位 cookie,
+    /// 未到达 GitHub OAuth(reachedGitHubOAuth)前命中的一律按占位忽略,继续轮询,
+    /// 避免「自动登录在启动 1.5 秒后虚假成功、捕获占位 cookie」。
     @MainActor
     private func pollCookies() {
         guard !succeeded, let webView else { return }
@@ -426,9 +444,14 @@ struct GitHubLoginView: View {
         cookieStore.getAllCookies { cookies in
             Task { @MainActor in
                 guard !self.succeeded else { return }
-                if let cookie = GitHubLoginService.extractAuthCookie(from: cookies) {
+                if let cookie = GitHubLoginService.extractAuthCookie(
+                    from: cookies, oauthStarted: self.reachedGitHubOAuth) {
                     self.flowLog.log("cookie: poll hit")
                     self.succeed(cookie: cookie)
+                } else if !self.reachedGitHubOAuth,
+                          GitHubLoginService.extractAuthCookie(from: cookies, oauthStarted: true) != nil {
+                    // 命中了 Fe26. 前缀但尚未到 GitHub —— 匿名占位,忽略并继续轮询
+                    self.flowLog.log("cookie: anonymous placeholder before OAuth, ignoring")
                 }
             }
         }

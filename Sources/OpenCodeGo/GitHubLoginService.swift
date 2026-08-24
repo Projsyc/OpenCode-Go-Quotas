@@ -246,7 +246,13 @@ struct GitHubLoginService {
     /// 从 cookie 集合中提取 opencode auth cookie:
     /// 名称大小写不敏感匹配 "auth",值以 "Fe26." 开头;
     /// 优先取 opencode 域(含子域)的 cookie,没有匹配时退回任意域。
-    static func extractAuthCookie(from cookies: [HTTPCookie]) -> String? {
+    ///
+    /// `oauthStarted`:是否已到达 GitHub OAuth(/login、oauth/authorize 等)。
+    /// opencode 对**任何匿名访问**都会下发 auth=Fe26. 开头的占位 cookie,
+    /// 未经过 GitHub OAuth 就命中的必是占位 cookie(未登录态)→ 返回 nil 忽略,
+    /// 避免「自动登录在启动约 1.5 秒后虚假成功、捕获占位 cookie」(线上实证)。
+    static func extractAuthCookie(from cookies: [HTTPCookie], oauthStarted: Bool) -> String? {
+        guard oauthStarted else { return nil }
         let matches = cookies.filter { $0.name.lowercased() == "auth" && $0.value.hasPrefix("Fe26.") }
         guard let first = matches.first else { return nil }
         return matches.first(where: { isOpenCodeCookie($0) })?.value ?? first.value
