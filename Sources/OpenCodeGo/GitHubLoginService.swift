@@ -364,7 +364,10 @@ struct GitHubLoginService {
         """
     }
 
-    /// 读 document.cookie 中的 auth cookie;未登录且页面有 GitHub 登录入口时点击它(触发 OAuth,仅一次)
+    /// 读 document.cookie 中的 auth cookie;未登录且页面有 GitHub 登录入口时点击它(触发 OAuth,仅一次)。
+    /// 点击选择器按优先级:`a[href*="/github/authorize"]`(线上 OpenAuth 登录页真实入口,带前导斜杠
+    /// 避免误匹配 github.com/login/oauth)→ `a[href*="oauth/authorize"]`(GitHub OAuth 授权页形态)
+    /// → `a[href*="github.com/login/oauth"]`(标准 GitHub OAuth 链接)
     static func readCookiesJS() -> String {
         """
         (function() {
@@ -373,7 +376,7 @@ struct GitHubLoginService {
           var out = {auth: auth};
           if (!auth && !window.__opencodeGoClickedSignIn) {
             var link = document.querySelector(
-              'a[href*="oauth/authorize"], a[href*="github.com/login/oauth"]');
+              'a[href*="/github/authorize"], a[href*="oauth/authorize"], a[href*="github.com/login/oauth"]');
             if (link) {
               window.__opencodeGoClickedSignIn = true;
               link.click();
