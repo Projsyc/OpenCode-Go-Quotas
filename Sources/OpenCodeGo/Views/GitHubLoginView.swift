@@ -28,7 +28,6 @@ struct GitHubLoginView: View {
     // WebView 与导航
     @State private var webView: WKWebView?
     @State private var navigator: LoginNavigator?
-    @State private var loadStarted = false
 
     // 状态机
     @State private var currentStep: GitHubLoginStep = .idle
