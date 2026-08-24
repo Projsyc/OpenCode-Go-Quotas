@@ -169,6 +169,15 @@ struct QuotaClient: Sendable {
 
     // MARK: - 用量历史
 
+    /// history 字段正则的「词边界」锚定:字段名必须独立成词,前置字符不能是字母/数字/下划线。
+    /// 坑(b29 实锤):不加边界时 `cost:` 是 `total_cost:` 的子串,单条真实 $0.0019 会被
+    /// 抢匹配成 $194,958.00,再求和 → 合计 US$98,711,933。同一病根影响
+    /// `id:`(`uid:`/`xid:`)、`keyID:`(`apikeyID:`)、`model:`/`plan:` 等所有「字段名子串」捕获。
+    /// 注意:NSRegularExpression(ICU)lookbehind 仅支持定长,单字符类可用;
+    /// 大小写敏感(默认)下 `totalCost`(大写 C)本就不匹配 `cost:`,边界同时防护
+    /// 全小写 `totalcost:` 与下划线变体。所有 history 字段正则(含诊断旁路)统一走此前缀。
+    private static let historyFieldBoundary = #"(?<![A-Za-z0-9_])"#
+
     /// 调用 opencode.ai/_server RPC 抓取 Usage 页面数据,解析出逐请求用量记录
     func fetchGoUsageHistory(
         workspaceId: String,
@@ -251,8 +260,10 @@ struct QuotaClient: Sendable {
 
     /// 诊断:返回 slice 中 cost 正则首个完整匹配串,及该匹配两侧各
     /// historyDiagContextRadius 字符的上下文(换行已转义)。无匹配返回 nil。
+    /// 与 historyDouble("cost") 共用同一词边界正则,保证 match 与解析结果一致。
     static func historyDiagMatch(in slice: String) -> (match: String, ctx: String)? {
-        guard let m = RX.firstFullMatch(#"cost:\s*(\d+(?:\.\d+)?)"#, in: slice) else { return nil }
+        guard let m = RX.firstFullMatch(
+            #"\#(Self.historyFieldBoundary)cost:\s*(\d+(?:\.\d+)?)"#, in: slice) else { return nil }
         return (
             m.text,
             diagContext(in: slice, around: m.range, radius: historyDiagContextRadius))
@@ -263,7 +274,7 @@ struct QuotaClient: Sendable {
     static func parseHistoryBody(
         _ body: String, diag: HistoryDiagSink = HistoryDiagSink()
     ) -> [UsageHistoryItem] {
-        let anchorPattern = #"id:\s*"usg_[A-Za-z0-9]+""#
+        let anchorPattern = #"\#(Self.historyFieldBoundary)id:\s*"usg_[A-Za-z0-9]+""#
         let anchors = RX.allRanges(anchorPattern, in: body)
         guard !anchors.isEmpty else { return [] }
 
@@ -277,19 +288,20 @@ struct QuotaClient: Sendable {
             else { continue }
             let slice = String(body[r])
 
-            guard let idRaw = RX.capture(#"id:\s*"usg_([A-Za-z0-9]+)""#, in: slice) else { continue }
+            guard let idRaw = RX.capture(
+                #"\#(Self.historyFieldBoundary)id:\s*"usg_([A-Za-z0-9]+)""#, in: slice) else { continue }
 
             let timeCreated = Self.historyTimeCreated(in: slice) ?? Date.distantPast
-            let model = RX.capture(#"model:\s*"([^"]*)""#, in: slice) ?? ""
-            let provider = RX.capture(#"provider:\s*"([^"]*)""#, in: slice) ?? ""
+            let model = RX.capture(#"\#(Self.historyFieldBoundary)model:\s*"([^"]*)""#, in: slice) ?? ""
+            let provider = RX.capture(#"\#(Self.historyFieldBoundary)provider:\s*"([^"]*)""#, in: slice) ?? ""
             let inputTokens = Self.historyInt("inputTokens", in: slice)
             let outputTokens = Self.historyInt("outputTokens", in: slice)
             let reasoningTokens = Self.historyInt("reasoningTokens", in: slice)
             let cacheReadTokens = Self.historyInt("cacheReadTokens", in: slice)
             let cost = Self.historyDouble("cost", in: slice)
-            let keyID = RX.capture(#"keyID:\s*"([^"]*)""#, in: slice) ?? ""
-            let sessionID = RX.capture(#"sessionID:\s*"([^"]*)""#, in: slice) ?? ""
-            let plan = RX.capture(#"plan:\s*"([^"]*)""#, in: slice)
+            let keyID = RX.capture(#"\#(Self.historyFieldBoundary)keyID:\s*"([^"]*)""#, in: slice) ?? ""
+            let sessionID = RX.capture(#"\#(Self.historyFieldBoundary)sessionID:\s*"([^"]*)""#, in: slice) ?? ""
+            let plan = RX.capture(#"\#(Self.historyFieldBoundary)plan:\s*"([^"]*)""#, in: slice)
 
             items.append(UsageHistoryItem(
                 id: "usg_\(idRaw)",
@@ -322,24 +334,27 @@ struct QuotaClient: Sendable {
     /// timeCreated:\s*(?:$R[N]=)?new Date("...")
     private static func historyTimeCreated(in slice: String) -> Date? {
         guard let raw = RX.capture(
-            #"timeCreated:\s*(?:\$R\[\s*\d+\s*\]\s*=\s*)?new Date\("([^"]+)"\)"#, in: slice)
+            #"\#(Self.historyFieldBoundary)timeCreated:\s*(?:\$R\[\s*\d+\s*\]\s*=\s*)?new Date\("([^"]+)"\)"#,
+            in: slice)
         else { return nil }
         return Self.parseDate(raw)
     }
 
     private static func historyInt(_ key: String, in slice: String) -> Int {
-        RX.capture("\(key):\\s*(\\d+)", in: slice).flatMap(Int.init) ?? 0
+        RX.capture("\(Self.historyFieldBoundary)\(key):\\s*(\\d+)", in: slice).flatMap(Int.init) ?? 0
     }
 
     private static func historyNullableInt(_ key: String, in slice: String) -> Int? {
-        guard let raw = RX.capture("\(key):\\s*(\\d+|null)", in: slice), raw != "null" else {
+        guard let raw = RX.capture(
+            "\(Self.historyFieldBoundary)\(key):\\s*(\\d+|null)", in: slice), raw != "null" else {
             return nil
         }
         return Int(raw)
     }
 
     private static func historyDouble(_ key: String, in slice: String) -> Double {
-        RX.capture("\(key):\\s*(\\d+(?:\\.\\d+)?)", in: slice).flatMap(Double.init) ?? 0
+        RX.capture("\(Self.historyFieldBoundary)\(key):\\s*(\\d+(?:\\.\\d+)?)", in: slice)
+            .flatMap(Double.init) ?? 0
     }
 
     private static func parseDate(_ s: String) -> Date? {
