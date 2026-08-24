@@ -1,8 +1,27 @@
 import SwiftUI
 
+/// 主界面分段:OpenCode 额度 / GitHub 账号
+enum AppTab: String, CaseIterable, Identifiable {
+    case opencode
+    case github
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .opencode: return "OpenCode 额度"
+        case .github: return "GitHub 账号"
+        }
+    }
+}
+
 struct ContentView: View {
     @Environment(AccountStore.self) private var store
+    @Environment(GitHubAccountStore.self) private var githubStore
+    @State private var tab: AppTab = .opencode
     @State private var showingAdd = false
+    @State private var showingImport = false
+    @State private var showingAddGitHub = false
     @State private var refreshing = false
 
     private var todayCost: Double? {
@@ -23,10 +42,15 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     hero
-                    if store.accounts.isEmpty {
-                        emptyState
+                    tabPicker
+                    if tab == .opencode {
+                        if store.accounts.isEmpty {
+                            emptyState
+                        } else {
+                            accountGrid
+                        }
                     } else {
-                        accountGrid
+                        githubSection
                     }
                     footnote
                 }
@@ -37,6 +61,12 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingAdd) {
             AddEditAccountView(account: nil)
+        }
+        .sheet(isPresented: $showingImport) {
+            GitHubImportView()
+        }
+        .sheet(isPresented: $showingAddGitHub) {
+            GitHubEditView(account: nil)
         }
     }
 
@@ -115,6 +145,104 @@ struct ContentView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.08))))
+    }
+
+    // MARK: - 分段切换
+
+    private var tabPicker: some View {
+        HStack(spacing: 4) {
+            ForEach(AppTab.allCases) { tabOption in
+                Button {
+                    tab = tabOption
+                } label: {
+                    Text(tabOption.title)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(tab == tabOption ? Color.white : Color.secondary)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(tab == tabOption ? ThemeAccent() : Color.clear))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .background(Capsule().fill(.ultraThinMaterial))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+        .frame(maxWidth: .infinity)
+    }
+
+    // MARK: - GitHub 账号 tab
+
+    private var githubSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Text("GitHub 多账号")
+                    .font(.title3.weight(.bold))
+                Spacer()
+                statChip(value: "\(githubStore.accounts.count)", label: "账号")
+                Button {
+                    showingImport = true
+                } label: {
+                    Label("批量导入", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                Button {
+                    showingAddGitHub = true
+                } label: {
+                    Label("添加账号", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(ThemeAccent())
+            }
+            if githubStore.accounts.isEmpty {
+                githubEmptyState
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 350), spacing: 16)], spacing: 16) {
+                    ForEach(githubStore.accounts) { account in
+                        GitHubAccountCardView(account: account)
+                    }
+                }
+            }
+        }
+    }
+
+    private var githubEmptyState: some View {
+        VStack(spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(Color(hex: 0x24292F).opacity(0.12))
+                    .frame(width: 104, height: 104)
+                Image(systemName: "person.crop.circle.badge.plus")
+                    .font(.system(size: 34))
+                    .foregroundStyle(Color(hex: 0x24292F).opacity(0.45))
+            }
+            VStack(spacing: 6) {
+                Text("还没有 GitHub 账号")
+                    .font(.title3.weight(.semibold))
+                Text("批量粘贴导入「用户名 密码 验证码/TOTP 密钥」,或手动添加单个账号")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 10) {
+                Button {
+                    showingImport = true
+                } label: {
+                    Label("批量导入", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                Button {
+                    showingAddGitHub = true
+                } label: {
+                    Label("添加账号", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(ThemeAccent())
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 60)
     }
 
     // MARK: - 账号网格
