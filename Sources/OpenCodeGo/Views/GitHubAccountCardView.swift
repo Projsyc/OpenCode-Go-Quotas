@@ -44,18 +44,7 @@ struct GitHubAccountCardView: View {
             footbar(account)
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.25), Color.primary.opacity(0.05)],
-                                startPoint: .topLeading, endPoint: .bottomTrailing)))
-                .shadow(color: .black.opacity(hovering ? 0.18 : 0.08), radius: hovering ? 16 : 10, y: 5))
-        .scaleEffect(hovering ? 1.012 : 1)
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hovering)
+        .cardShell(hovering: hovering)
         .onHover { hovering = $0 }
         .task(id: account.updatedAt) {
             secret = store.credential(for: account)
