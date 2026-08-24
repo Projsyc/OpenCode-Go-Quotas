@@ -87,7 +87,7 @@ final class GitHubImportParserTests: XCTestCase {
     }
 
     /// L5:导入路径用严格判定,截断 secret 整行报格式无效
-    func testParseRejectsTruncatedSecretCredential() {
+    func testParseRejectsTruncatedSecretCredential() throws {
         XCTAssertThrowsError(try GitHubImportParser.parse("u1,pass1234,GEZDGNBVGY3TQOJQGE")) { error in
             XCTAssertEqual(error as? GitHubParseError,
                            .invalidRow(line: 1, reason: "验证码/TOTP secret 格式无效"))
