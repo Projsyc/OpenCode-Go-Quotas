@@ -216,7 +216,7 @@ struct GitHubImportView: View {
                 importAll()
             }
             .buttonStyle(.borderedProminent)
-            .tint(ThemeAccent())
+            .tint(Theme.accentSolid)
             .keyboardShortcut(.defaultAction)
             .disabled(validCount == 0)
         }
@@ -315,8 +315,4 @@ struct GitHubImportPreviewRow: Identifiable, Equatable, Sendable {
 
     var id: Int { lineNumber }
     var kind: GitHubCredentialKind? { row?.kind }
-}
-
-private func ThemeAccent() -> Color {
-    Color(hex: 0x7C6CF0)
 }
