@@ -67,7 +67,7 @@ struct GitHubEditView: View {
                     .font(.system(.body, design: .monospaced))
                     .autocorrectionDisabled()
                     .onChange(of: credential) { _, newValue in
-                        if let inferred = Self.inferKind(newValue) {
+                        if let inferred = GitHubCredentialKind.kind(for: newValue) {
                             kind = inferred
                         }
                     }
@@ -173,7 +173,7 @@ struct GitHubEditView: View {
         // 有凭据但未显式选择类型时按内容推断;推断不出则报错
         var effectiveKind = kind
         if !credentialValue.isEmpty, effectiveKind == nil {
-            effectiveKind = Self.inferKind(credentialValue)
+            effectiveKind = GitHubCredentialKind.kind(for: credentialValue)
             guard effectiveKind != nil else { throw SaveError.message("验证码/TOTP 密钥格式无效") }
         }
         let notesValue = notes.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -194,18 +194,6 @@ struct GitHubEditView: View {
                 credential: credentialValue.isEmpty ? nil : credentialValue,
                 kind: credentialValue.isEmpty ? nil : effectiveKind)
         }
-    }
-
-    /// 按内容推断凭据类型:6 位纯数字 → 一次性验证码;合法 base32(≥ 8 字节)→ TOTP 密钥
-    static func inferKind(_ value: String) -> GitHubCredentialKind? {
-        let v = value.trimmingCharacters(in: .whitespaces)
-        if v.count == 6, v.allSatisfy({ $0.isASCII && $0.isWholeNumber }) {
-            return .oneTimeCode
-        }
-        if let decoded = TOTPGenerator.decodeBase32(v), decoded.count >= 8 {
-            return .totpSecret
-        }
-        return nil
     }
 }
 

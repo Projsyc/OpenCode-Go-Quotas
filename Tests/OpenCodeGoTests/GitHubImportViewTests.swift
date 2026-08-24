@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import OpenCodeGo
 
-/// GitHubImportView 预览行 / GitHubEditView 类型推断的纯逻辑测试(不碰真实存储)
+/// GitHubImportView 预览行 / 凭据类型共享推断(GitHubCredentialKind.kind(for:))的纯逻辑测试(不碰真实存储)
 final class GitHubImportViewTests: XCTestCase {
 
     func testPreviewValidRows() throws {
@@ -59,11 +59,12 @@ final class GitHubImportViewTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty)
     }
 
-    func testInferKind() {
-        XCTAssertEqual(GitHubEditView.inferKind("123456"), .oneTimeCode)
-        XCTAssertEqual(GitHubEditView.inferKind("JBSWY3DPEHPK3PXP"), .totpSecret)
-        XCTAssertNil(GitHubEditView.inferKind("12345"))
-        XCTAssertNil(GitHubEditView.inferKind("notbase32!!"))
-        XCTAssertEqual(GitHubEditView.inferKind(" 123456 "), .oneTimeCode)
+    func testCredentialKindSharedInference() {
+        // S1:原 GitHubEditView.inferKind 已收敛为 GitHubCredentialKind.kind(for:) 共享函数
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "123456"), .oneTimeCode)
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "JBSWY3DPEHPK3PXP"), .totpSecret)
+        XCTAssertNil(GitHubCredentialKind.kind(for: "12345"))
+        XCTAssertNil(GitHubCredentialKind.kind(for: "notbase32!!"))
+        XCTAssertEqual(GitHubCredentialKind.kind(for: " 123456 "), .oneTimeCode)
     }
 }

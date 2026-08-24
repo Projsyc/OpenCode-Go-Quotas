@@ -123,6 +123,21 @@ struct UsageHistoryItem: Codable, Sendable, Identifiable, Equatable {
 enum GitHubCredentialKind: String, Codable, Sendable, Equatable {
     case oneTimeCode
     case totpSecret
+
+    /// 按内容推断凭据类型:6 位纯数字 → 一次性验证码;合法 base32(解码 ≥ 8 字节)→ TOTP secret;
+    /// 其余返回 nil。共享判定(原 GitHubImportParser.classifyCredential / GitHubEditView.inferKind
+    /// 两份实现收敛于此),规则与历史行为完全一致。
+    static func kind(for credential: String) -> GitHubCredentialKind? {
+        let value = credential.trimmingCharacters(in: .whitespaces)
+        if value.count == 6,
+           value.allSatisfy({ $0.isASCII && $0.isWholeNumber }) {
+            return .oneTimeCode
+        }
+        if let decoded = TOTPGenerator.decodeBase32(value), decoded.count >= 8 {
+            return .totpSecret
+        }
+        return nil
+    }
 }
 
 /// GitHub 账号元数据(密码/secret 一律不在本结构,存 Keychain)

@@ -55,6 +55,41 @@ final class GitHubImportParserTests: XCTestCase {
         XCTAssertEqual(padded[0].kind, .totpSecret)
     }
 
+    /// S1:共享判定函数(原 classifyCredential / inferKind 两份实现收敛于此)
+    func testCredentialKindSharedFunction() {
+        // 6 位纯数字 → 一次性验证码(含首尾空白裁剪)
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "123456"), .oneTimeCode)
+        XCTAssertEqual(GitHubCredentialKind.kind(for: " 123456 "), .oneTimeCode)
+        // 合法 base32(解码 ≥ 8 字节)→ TOTP secret(大小写 / padding 均可)
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "GEZDGNBVGY3TQOJQ"), .totpSecret)
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "gezdgnbvgy3tqojq"), .totpSecret)
+        XCTAssertEqual(GitHubCredentialKind.kind(for: "GEZDGNBVGY3TQOJQ===="), .totpSecret)
+        // nil:位数不足 / 非法字符('1' 不在 base32 字母表)/ 空串
+        XCTAssertNil(GitHubCredentialKind.kind(for: "12345"))
+        XCTAssertNil(GitHubCredentialKind.kind(for: "ABC123"))
+        XCTAssertNil(GitHubCredentialKind.kind(for: ""))
+        XCTAssertNil(GitHubCredentialKind.kind(for: "   "))
+    }
+
+    /// S2:逐行解析入口(供预览复用,与 parse 全量路径共用判定)
+    func testParseRow() throws {
+        // 空行 / 纯空白 / 注释行 → nil(跳过)
+        XCTAssertNil(try GitHubImportParser.parseRow("", lineNumber: 1))
+        XCTAssertNil(try GitHubImportParser.parseRow("   ", lineNumber: 2))
+        XCTAssertNil(try GitHubImportParser.parseRow("# 注释", lineNumber: 3))
+        // 有效行 → 解析结果,行号保留
+        let row = try XCTUnwrap(GitHubImportParser.parseRow("user1, pass123, JBSWY3DPEHPK3PXP", lineNumber: 7))
+        XCTAssertEqual(row.lineNumber, 7)
+        XCTAssertEqual(row.username, "user1")
+        XCTAssertEqual(row.password, "pass123")
+        XCTAssertEqual(row.kind, .totpSecret)
+        // 无效行 → 抛带行号的错误
+        XCTAssertThrowsError(try GitHubImportParser.parseRow("onlyuser", lineNumber: 5)) { error in
+            XCTAssertEqual(error as? GitHubParseError,
+                           .invalidRow(line: 5, reason: "空格分隔需恰好 3 列(用户名 密码 验证码/TOTP),实际 1 列"))
+        }
+    }
+
     func testInvalidCredentialReportsLineNumber() {
         // 行 1 有效;行 4 第三列既不是 6 位数字也不是合法 base32('1' 不在字母表)
         let text = """
