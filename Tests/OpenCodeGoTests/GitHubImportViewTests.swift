@@ -78,4 +78,32 @@ final class GitHubImportViewTests: XCTestCase {
         XCTAssertNil(GitHubCredentialKind.kind(for: "notbase32!!"))
         XCTAssertEqual(GitHubCredentialKind.kind(for: " 123456 "), .oneTimeCode)
     }
+
+    // MARK: - ghatips:密码首尾空白提示 + 非行级错误文案
+
+    /// 预览行:密码含首尾空白 → 行级提示;无 → nil
+    func testPreviewPasswordTrimHint() throws {
+        let rows = GitHubImportView.previewRows(from: "user1,  pass1234\nuser2, pass456\nuser3, pass 789, JBSWY3DPEHPK3PXP")
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertNil(rows[0].error)
+        XCTAssertEqual(rows[0].passwordHint, "已去除密码首尾空白")
+        XCTAssertNil(rows[1].passwordHint)
+        XCTAssertNil(rows[2].passwordHint)
+    }
+
+    /// 错误行(无解析结果)不产生密码提示
+    func testPreviewPasswordHintAbsentOnErrorRows() throws {
+        let rows = GitHubImportView.previewRows(from: "onlyuser\n")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertNotNil(rows[0].error)
+        XCTAssertNil(rows[0].passwordHint)
+    }
+
+    /// skipText:行号 0(importBatch 整批级错误)→「导入错误:」,非「第 0 行:」
+    func testSkipTextZeroLineNumberUsesImportError() {
+        XCTAssertEqual(GitHubImportView.skipText(GitHubImportSkip(lineNumber: 0, reason: "写盘失败")),
+                       "导入错误:写盘失败")
+        XCTAssertEqual(GitHubImportView.skipText(GitHubImportSkip(lineNumber: 3, reason: "用户名已存在")),
+                       "第 3 行:用户名已存在")
+    }
 }
