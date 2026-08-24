@@ -14,6 +14,8 @@ struct GitHubEditView: View {
     @State private var showPassword = false
     @State private var kind: GitHubCredentialKind?
     @State private var errorText: String?
+    @State private var showClearConfirm = false
+    @State private var clearMessage: String?
 
     private var isEditing: Bool { account != nil }
 
@@ -85,10 +87,34 @@ struct GitHubEditView: View {
             }
             .formStyle(.columns)
 
+            if isEditing, let account, account.credentialKind != nil {
+                Button("清除已存凭据", role: .destructive) {
+                    showClearConfirm = true
+                }
+                .font(.caption)
+                .buttonStyle(.borderless)
+                .confirmationDialog(
+                    "清除已存凭据?",
+                    isPresented: $showClearConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button("清除", role: .destructive) { clearStoredCredential() }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("将删除已保存的 TOTP 密钥或一次性验证码,密码不受影响")
+                }
+            }
+
             if let errorText {
                 Label(errorText, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.red)
+            }
+
+            if let clearMessage {
+                Label(clearMessage, systemImage: "checkmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.green)
             }
 
             HStack {
@@ -120,6 +146,19 @@ struct GitHubEditView: View {
         username = account.username
         notes = account.notes
         kind = account.credentialKind
+    }
+
+    private func clearStoredCredential() {
+        guard let account else { return }
+        do {
+            try store.clearCredential(account.id)
+            credential = ""
+            kind = nil
+            clearMessage = "已清除已存凭据"
+            errorText = nil
+        } catch {
+            errorText = error.localizedDescription
+        }
     }
 
     private func save() throws {

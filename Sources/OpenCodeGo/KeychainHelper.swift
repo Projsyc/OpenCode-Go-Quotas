@@ -60,3 +60,12 @@ enum KeychainError: LocalizedError {
         }
     }
 }
+
+/// 内存 Keychain:测试与 --demo 模式复用,进程内有效,不落盘
+final class InMemoryKeychain: KeychainStoring {
+    private(set) var storage: [String: String] = [:]
+
+    func set(_ value: String, forKey key: String) throws { storage[key] = value }
+    func get(_ key: String) -> String? { storage[key] }
+    func delete(_ key: String) { storage[key] = nil }
+}
