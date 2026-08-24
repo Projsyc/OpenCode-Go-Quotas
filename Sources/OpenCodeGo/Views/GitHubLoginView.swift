@@ -45,6 +45,10 @@ struct GitHubLoginView: View {
     @State private var succeeded = false
     @State private var pollTimer: Timer?
     @State private var timeoutTask: Task<Void, Never>?
+    /// 启动加载阶段守护超时(15s)任务:start() 起计时,首个关键步骤到达
+    /// (currentStep 离开 idle/loadingLoginPage)或流程终止即取消;
+    /// 与 timeoutTask(300s)并行,只覆盖启动加载段,阶段达成后无残留
+    @State private var stageTimeoutTask: Task<Void, Never>?
     /// 在途注入(凭据重试 / 内联 OTP 探测 / 一次性注入重试):新决策或页面消失时取消,
     /// 防止旧页面上下文误注入
     @State private var injectionTask: Task<Void, Never>?
@@ -71,7 +75,16 @@ struct GitHubLoginView: View {
     /// 零门槛取证(os_log 采集依赖 log show 命令,且部分环境采集不到,见 LoginLogSink 注释)
     private let logSink = LoginLogSink()
     private let service = GitHubLoginService()
-    private static let loginTimeout: Duration = .seconds(300)
+    /// 全局无进展超时:最后一次「步骤变化」起 300s 无推进 → 判失败。
+    /// 全程兜底:启动加载阶段之后的各阶段(表单/2FA/回跳)都靠它;
+    /// 步骤变化即重启,见 GitHubLoginService.shouldRestartTimeout
+    static let loginTimeout: Duration = .seconds(300)
+    /// 启动加载阶段守护超时:start() 起 15s 内未到达首个关键步骤(进入 github
+    /// 登录页/授权页,即离开 idle/loadingLoginPage)→ 判失败,不等 300s 全局超时。
+    /// 只覆盖「启动加载」一段:阶段达成即取消;后续阶段仍由 loginTimeout 兜底(不叠加)
+    static let loginStageTimeout: Duration = .seconds(15)
+    /// 启动阶段守护超时失败文案(用户可见;logger + login.log 同步,b18 管线)
+    static let loginStageTimeoutMessage = "登录页加载超时(15s),请重试或手动打开授权链接"
 
     init(
         account: GitHubAccount,
@@ -96,6 +109,7 @@ struct GitHubLoginView: View {
         .onDisappear {
             stopPolling()
             stopTimeout()
+            stopStageTimeout()
             cancelPendingInjection()
             // 兜底清理:sheet 被编程式关闭 / 窗口直接关闭时,成功/取消/超时三条路径都
             // 不会走到 wipeStore,这里全清 nonPersistent 会话,不留 Cookie 残留。
@@ -218,6 +232,7 @@ struct GitHubLoginView: View {
         cancelPendingInjection()
         stopPolling()
         stopTimeout()
+        stopStageTimeout()
         flowLog.clear()
         flowLog.log("flow start")
         flowLogDumped = false
@@ -237,6 +252,7 @@ struct GitHubLoginView: View {
 
         loadStartPage(in: wv)
         restartTimeout()
+        restartStageTimeout()
     }
 
     private func fetchCredentials() {
@@ -303,6 +319,12 @@ struct GitHubLoginView: View {
             // 步骤变化 → 重启 300s 无进展超时(终态除外,decide 不产生终态)
             if GitHubLoginService.shouldRestartTimeout(oldStep: previousStep, newStep: decision.step) {
                 restartTimeout()
+            }
+            // 离开启动加载阶段(idle/loadingLoginPage)= 首个关键步骤已到达
+            // (github 登录页/授权页等)→ 15s 阶段守护超时达成,取消计时;
+            // 后续阶段仍由 300s 全局无进展超时兜底(不重复叠加)
+            if !GitHubLoginService.isStartupLoadingStep(decision.step) {
+                stopStageTimeout()
             }
         }
         if decision.pollCookie {
@@ -604,6 +626,7 @@ struct GitHubLoginView: View {
         succeeded = true
         stopPolling()
         stopTimeout()
+        stopStageTimeout()
         flowLog.log("success: cookie captured")
         dumpFlowLog()
         wipeStore()
@@ -628,6 +651,7 @@ struct GitHubLoginView: View {
         succeeded = true
         stopPolling()
         stopTimeout()
+        stopStageTimeout()
         flowLog.log("cancelled")
         dumpFlowLog()
         wipeStore()
@@ -635,13 +659,16 @@ struct GitHubLoginView: View {
         dismiss()
     }
 
-    /// 超时(5 分钟无进展)→ failed,用户可取消后重试
+    /// 超时(5 分钟无进展)→ failed,用户可取消后重试。
+    /// 启动加载阶段的 15s 守护超时见 restartStageTimeout(此处触发时一并取消,
+    /// 避免双计时器在终态上残留)
     private func restartTimeout() {
         stopTimeout()
         timeoutTask = Task { @MainActor in
             try? await Task.sleep(for: Self.loginTimeout)
             guard !Task.isCancelled, !succeeded else { return }
             stopPolling()
+            stopStageTimeout()
             // 终止标记:超时后残留的轮询 / 导航回调不得再触发成功回调
             // (把 .failed 覆盖为 .waitingOAuthRedirect 等)或 onAuthCookie
             succeeded = true
@@ -655,6 +682,42 @@ struct GitHubLoginView: View {
     private func stopTimeout() {
         timeoutTask?.cancel()
         timeoutTask = nil
+    }
+
+    /// 启动加载阶段守护超时(start() 起 15s):首个关键步骤(进入 github 登录页/
+    /// 授权页,即 currentStep 离开 idle/loadingLoginPage)未在限期内到达 → 判失败。
+    ///
+    /// 背景(审计 #9):自动登录各阶段无独立守护超时,阶段静默卡住时
+    /// (didFinish 不再到来 / 轮询持续空转)步骤不再变化,300s 全局无进展超时
+    /// (按「步骤变化」重启)无法启动,用户最长等 5 分钟才看到失败提示;
+    /// 本阶段超时把启动加载段的等待压缩到 15s。
+    ///
+    /// 与全局超时关系:只覆盖「启动加载」一段,阶段达成/流程终止即取消;
+    /// 后续阶段仍由 300s 全局超时兜底,不重复叠加。
+    /// 触发语义与全局超时一致:置 succeeded 终止标记 → 残留导航/轮询/注入
+    /// 回调不再推进状态或触发 onAuthCookie,并清 nonPersistent 会话。
+    private func restartStageTimeout() {
+        stopStageTimeout()
+        stageTimeoutTask = Task { @MainActor in
+            try? await Task.sleep(for: Self.loginStageTimeout)
+            guard !Task.isCancelled, !succeeded else { return }
+            // 幂等双守卫:阶段已达成(步骤已离开启动加载,如转手动/成功路径)
+            // 或流程已终止 → 不判超时(正常路径早经 stopStageTimeout 取消)
+            guard GitHubLoginService.isStartupLoadingStep(currentStep) else { return }
+            stopPolling()
+            stopTimeout()
+            // 终止标记:超时后残留的轮询 / 导航回调不得再触发成功回调或 onAuthCookie
+            succeeded = true
+            flowLog.log("stage-timeout: 15s 未到达登录页")
+            dumpFlowLog()
+            wipeStore()
+            currentStep = .failed(Self.loginStageTimeoutMessage)
+        }
+    }
+
+    private func stopStageTimeout() {
+        stageTimeoutTask?.cancel()
+        stageTimeoutTask = nil
     }
 
     /// 全清 nonPersistent 会话(Cookie/缓存),不留痕;成功与失败/取消都会调用
