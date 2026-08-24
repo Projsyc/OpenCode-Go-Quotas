@@ -82,3 +82,38 @@ struct UsageHistoryItem: Codable, Sendable, Identifiable, Equatable {
             + (cacheWrite5mTokens ?? 0) + (cacheWrite1hTokens ?? 0)
     }
 }
+
+/// GitHub 账号凭据类型:一次性验证码 或 TOTP secret
+enum GitHubCredentialKind: String, Codable, Sendable, Equatable {
+    case oneTimeCode
+    case totpSecret
+}
+
+/// GitHub 账号元数据(密码/secret 一律不在本结构,存 Keychain)
+struct GitHubAccount: Codable, Identifiable, Sendable, Equatable {
+    var id: UUID
+    var username: String
+    var notes: String
+    var createdAt: Date
+    var updatedAt: Date
+    var credentialKind: GitHubCredentialKind?   // nil = 只有密码
+    var lastCodeAt: Date?                       // 最近一次生成/导入验证码的时间(UI 倒计时用)
+
+    init(
+        id: UUID = UUID(),
+        username: String,
+        notes: String = "",
+        createdAt: Date = Date(),
+        updatedAt: Date = Date(),
+        credentialKind: GitHubCredentialKind? = nil,
+        lastCodeAt: Date? = nil
+    ) {
+        self.id = id
+        self.username = username
+        self.notes = notes
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.credentialKind = credentialKind
+        self.lastCodeAt = lastCodeAt
+    }
+}

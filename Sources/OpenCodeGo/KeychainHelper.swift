@@ -1,8 +1,15 @@
 import Foundation
 import Security
 
+/// Keychain 访问协议:供测试注入内存 mock
+protocol KeychainStoring {
+    func set(_ value: String, forKey key: String) throws
+    func get(_ key: String) -> String?
+    func delete(_ key: String)
+}
+
 /// 轻量 Keychain 封装:用于存放各账号的 auth Cookie(敏感数据不落盘)
-struct KeychainHelper {
+struct KeychainHelper: KeychainStoring {
     let service: String
 
     private func baseQuery(_ key: String) -> [String: Any] {
