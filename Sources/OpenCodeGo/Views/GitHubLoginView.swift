@@ -145,38 +145,25 @@ struct GitHubLoginView: View {
     }
 
     private var stepText: String {
-        switch currentStep {
-        case .idle: return "准备中…"
-        case .loadingLoginPage: return "正在打开 opencode.ai…"
-        case .githubLoginForm: return isWaitingFormRender ? "等待表单渲染…" : "正在自动完成 GitHub 登录…"
-        case .fillingCredentials: return "正在提交登录信息…"
-        case .twoFactor: return "正在自动输入两步验证码…"
-        case .waitingOAuthRedirect: return "登录成功,正在读取 Cookie…"
-        case .done: return "✓ 已获取 Cookie,即将关闭"
-        case .failed(let message): return message
-        case .needsManualIntervention(let message): return message
+        // 凭据注入重试中(表单未渲染)的特殊文案;其余文案数据收敛在 GitHubLoginStep.statusText
+        if currentStep == .githubLoginForm, isWaitingFormRender {
+            return "等待表单渲染…"
         }
+        return currentStep.statusText
     }
 
     private var stepIcon: String {
-        switch currentStep {
-        case .done: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
-        case .needsManualIntervention: return "person.crop.circle.badge.exclamationmark"
-        case .waitingOAuthRedirect: return "arrow.triangle.2.circlepath"
-        case .twoFactor: return "number.circle"
-        case .githubLoginForm, .fillingCredentials: return "pencil.circle"
-        default: return "circle.dotted"
-        }
+        currentStep.statusIcon
     }
 
     private var stepColor: Color {
-        switch currentStep {
-        case .done: return .green
-        case .failed: return .red
-        case .needsManualIntervention: return .orange
-        case .waitingOAuthRedirect: return .blue
-        default: return .secondary
+        // service 层只给语义标签,颜色映射留在视图层
+        switch currentStep.appearance {
+        case .normal: return .secondary
+        case .working: return .blue
+        case .success: return .green
+        case .error: return .red
+        case .warning: return .orange
         }
     }
 

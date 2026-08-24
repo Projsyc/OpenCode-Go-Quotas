@@ -347,6 +347,45 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertTrue(js.contains("JSON.stringify"))
     }
 
+    // MARK: - 步骤状态栏展示属性(S5:stepText/stepIcon/stepColor 数据收敛到 enum)
+
+    func testStepStatusText() {
+        XCTAssertEqual(GitHubLoginStep.idle.statusText, "准备中…")
+        XCTAssertEqual(GitHubLoginStep.loadingLoginPage.statusText, "正在打开 opencode.ai…")
+        XCTAssertEqual(GitHubLoginStep.githubLoginForm.statusText, "正在自动完成 GitHub 登录…")
+        XCTAssertEqual(GitHubLoginStep.fillingCredentials.statusText, "正在提交登录信息…")
+        XCTAssertEqual(GitHubLoginStep.twoFactor.statusText, "正在自动输入两步验证码…")
+        XCTAssertEqual(GitHubLoginStep.waitingOAuthRedirect.statusText, "登录成功,正在读取 Cookie…")
+        XCTAssertEqual(GitHubLoginStep.done(authCookie: "x").statusText, "✓ 已获取 Cookie,即将关闭")
+        XCTAssertEqual(GitHubLoginStep.failed("登录超时(5 分钟无进展),请取消后重试").statusText,
+                       "登录超时(5 分钟无进展),请取消后重试", "失败文案透传错误消息")
+        XCTAssertEqual(GitHubLoginStep.needsManualIntervention("请手动完成").statusText, "请手动完成")
+    }
+
+    func testStepStatusIcon() {
+        XCTAssertEqual(GitHubLoginStep.done(authCookie: "x").statusIcon, "checkmark.circle.fill")
+        XCTAssertEqual(GitHubLoginStep.failed("x").statusIcon, "exclamationmark.triangle.fill")
+        XCTAssertEqual(GitHubLoginStep.needsManualIntervention("x").statusIcon,
+                       "person.crop.circle.badge.exclamationmark")
+        XCTAssertEqual(GitHubLoginStep.waitingOAuthRedirect.statusIcon, "arrow.triangle.2.circlepath")
+        XCTAssertEqual(GitHubLoginStep.twoFactor.statusIcon, "number.circle")
+        XCTAssertEqual(GitHubLoginStep.githubLoginForm.statusIcon, "pencil.circle")
+        XCTAssertEqual(GitHubLoginStep.fillingCredentials.statusIcon, "pencil.circle")
+        XCTAssertEqual(GitHubLoginStep.idle.statusIcon, "circle.dotted")
+        XCTAssertEqual(GitHubLoginStep.loadingLoginPage.statusIcon, "circle.dotted")
+    }
+
+    func testStepAppearance() {
+        XCTAssertEqual(GitHubLoginStep.done(authCookie: "x").appearance, .success)
+        XCTAssertEqual(GitHubLoginStep.failed("x").appearance, .error)
+        XCTAssertEqual(GitHubLoginStep.needsManualIntervention("x").appearance, .warning)
+        XCTAssertEqual(GitHubLoginStep.waitingOAuthRedirect.appearance, .working)
+        for step in [GitHubLoginStep.idle, .loadingLoginPage, .githubLoginForm,
+                     .fillingCredentials, .twoFactor] {
+            XCTAssertEqual(step.appearance, .normal, "进行中/等待态统一为 normal 色")
+        }
+    }
+
     // MARK: - jsonEscaped
 
     func testJsonEscapedEdgeCases() {

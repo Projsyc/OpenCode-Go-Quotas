@@ -15,6 +15,56 @@ enum GitHubLoginStep: Equatable {
     case done(authCookie: String)  // 已捕获 opencode auth cookie(由视图在轮询命中时置入)
     case failed(String)
     case needsManualIntervention(String)  // 无法自动处理(验证码缺失/登录失败/风控),等用户在窗口内手动完成
+
+    // MARK: - 状态栏展示(数据收敛到 enum,视图只做查询)
+
+    /// 状态栏文案;`.githubLoginForm` 的「等待表单渲染…」由视图按注入重试状态叠加
+    var statusText: String {
+        switch self {
+        case .idle: return "准备中…"
+        case .loadingLoginPage: return "正在打开 opencode.ai…"
+        case .githubLoginForm: return "正在自动完成 GitHub 登录…"
+        case .fillingCredentials: return "正在提交登录信息…"
+        case .twoFactor: return "正在自动输入两步验证码…"
+        case .waitingOAuthRedirect: return "登录成功,正在读取 Cookie…"
+        case .done: return "✓ 已获取 Cookie,即将关闭"
+        case .failed(let message): return message
+        case .needsManualIntervention(let message): return message
+        }
+    }
+
+    /// 状态栏 SF Symbol 图标名
+    var statusIcon: String {
+        switch self {
+        case .done: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .needsManualIntervention: return "person.crop.circle.badge.exclamationmark"
+        case .waitingOAuthRedirect: return "arrow.triangle.2.circlepath"
+        case .twoFactor: return "number.circle"
+        case .githubLoginForm, .fillingCredentials: return "pencil.circle"
+        default: return "circle.dotted"
+        }
+    }
+
+    /// 状态栏色彩语义(service 层不依赖 SwiftUI,由视图把语义标签映射为 Color)
+    var appearance: StepAppearance {
+        switch self {
+        case .done: return .success
+        case .failed: return .error
+        case .needsManualIntervention: return .warning
+        case .waitingOAuthRedirect: return .working
+        default: return .normal
+        }
+    }
+}
+
+/// 步骤展示色彩语义:normal/secondary、working/blue、success/green、error/red、warning/orange
+enum StepAppearance: Equatable, Sendable {
+    case normal
+    case working
+    case success
+    case error
+    case warning
 }
 
 /// decide 的决策结果:下一步骤 + 要注入执行的 JS + 是否轮询 opencode cookie
