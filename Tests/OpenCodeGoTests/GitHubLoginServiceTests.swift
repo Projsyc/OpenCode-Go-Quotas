@@ -227,19 +227,19 @@ final class GitHubLoginServiceTests: XCTestCase {
 
     func testExtractAuthCookieFindsFe26() {
         let cookie = makeCookie(name: "auth", value: "Fe26.2**abc", domain: "opencode.ai")
-        XCTAssertEqual(GitHubLoginService.extractAuthCookie(from: [cookie]), "Fe26.2**abc")
+        XCTAssertEqual(GitHubLoginService.extractAuthCookie(from: [cookie], oauthStarted: true), "Fe26.2**abc")
     }
 
     func testExtractAuthCookieCaseInsensitiveName() {
         let cookie = makeCookie(name: "Auth", value: "Fe26.2**abc", domain: "opencode.ai")
-        XCTAssertEqual(GitHubLoginService.extractAuthCookie(from: [cookie]), "Fe26.2**abc")
+        XCTAssertEqual(GitHubLoginService.extractAuthCookie(from: [cookie], oauthStarted: true), "Fe26.2**abc")
     }
 
     func testExtractAuthCookiePrefersOpenCodeDomain() {
         let github = makeCookie(name: "auth", value: "Fe26.2**github", domain: "github.com")
         let opencode = makeCookie(name: "auth", value: "Fe26.2**opencode", domain: ".opencode.ai")
         XCTAssertEqual(
-            GitHubLoginService.extractAuthCookie(from: [github, opencode]),
+            GitHubLoginService.extractAuthCookie(from: [github, opencode], oauthStarted: true),
             "Fe26.2**opencode", "多 cookie 时应挑中 opencode 域的目标")
     }
 
@@ -247,16 +247,43 @@ final class GitHubLoginServiceTests: XCTestCase {
         let session = makeCookie(name: "session", value: "Fe26.2**nope", domain: "opencode.ai")
         let github = makeCookie(name: "auth", value: "Fe26.2**gh", domain: "github.com")
         XCTAssertEqual(
-            GitHubLoginService.extractAuthCookie(from: [session, github]),
+            GitHubLoginService.extractAuthCookie(from: [session, github], oauthStarted: true),
             "Fe26.2**gh", "opencode 域无目标时退回任意域")
     }
 
     func testExtractAuthCookieNoTargetReturnsNil() {
-        XCTAssertNil(GitHubLoginService.extractAuthCookie(from: []))
+        XCTAssertNil(GitHubLoginService.extractAuthCookie(from: [], oauthStarted: true))
         XCTAssertNil(GitHubLoginService.extractAuthCookie(from: [
             makeCookie(name: "auth", value: "not-fe26", domain: "opencode.ai"),
             makeCookie(name: "session", value: "Fe26.2**wrong-name", domain: "opencode.ai"),
-        ]))
+        ], oauthStarted: true))
+    }
+
+    // MARK: - extractAuthCookie:匿名占位门槛(修复:占位 cookie 被误判为登录成功)
+
+    /// 线上实证(opencode.ai 对任何匿名访问立即下发 auth=Fe26. 开头占位 cookie):
+    /// 未经过 GitHub OAuth(oauthStarted: false)命中的 Fe26. cookie 必是匿名占位 → 必须忽略
+    func testExtractAuthCookieRejectsPlaceholderBeforeOAuth() {
+        let placeholder = "Fe26.2**f20346b046d4ee255c0560383902bd9e0f845921653010f619cdf2f7295bbe7e*"
+        let cookie = makeCookie(name: "auth", value: placeholder, domain: "opencode.ai")
+        XCTAssertNil(GitHubLoginService.extractAuthCookie(from: [cookie], oauthStarted: false),
+                     "未经过 GitHub OAuth 的 Fe26. cookie 是匿名占位,不得判定命中")
+    }
+
+    /// 同一占位 cookie,经过 GitHub OAuth 后照常命中(值与提取逻辑不变)
+    func testExtractAuthCookieHitsPlaceholderAfterOAuth() {
+        let placeholder = "Fe26.2**f20346b046d4ee255c0560383902bd9e0f845921653010f619cdf2f7295bbe7e*"
+        let cookie = makeCookie(name: "auth", value: placeholder, domain: "opencode.ai")
+        XCTAssertEqual(GitHubLoginService.extractAuthCookie(from: [cookie], oauthStarted: true), placeholder)
+    }
+
+    /// 未经过 OAuth 时,即使集合里存在 Fe26. cookie(含 github 域)也一律不命中
+    func testExtractAuthCookieRejectsAllFe26BeforeOAuth() {
+        let cookies = [
+            makeCookie(name: "auth", value: "Fe26.2**placeholder", domain: "opencode.ai"),
+            makeCookie(name: "auth", value: "Fe26.2**gh", domain: "github.com"),
+        ]
+        XCTAssertNil(GitHubLoginService.extractAuthCookie(from: cookies, oauthStarted: false))
     }
 
     // MARK: - JS 构造与转义
