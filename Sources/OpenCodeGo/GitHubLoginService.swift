@@ -58,6 +58,24 @@ enum GitHubLoginStep: Equatable {
     }
 }
 
+extension GitHubLoginStep {
+    /// 诊断日志用步骤名(纯枚举名,不含任何关联值——绝不让 `.done(authCookie:)` 的
+    /// cookie 值或 `.failed` 的消息内容进入日志)
+    var flowName: String {
+        switch self {
+        case .idle: return "idle"
+        case .loadingLoginPage: return "loadingLoginPage"
+        case .githubLoginForm: return "githubLoginForm"
+        case .fillingCredentials: return "fillingCredentials"
+        case .twoFactor: return "twoFactor"
+        case .waitingOAuthRedirect: return "waitingOAuthRedirect"
+        case .done: return "done"
+        case .failed: return "failed"
+        case .needsManualIntervention: return "needsManualIntervention"
+        }
+    }
+}
+
 /// 步骤展示色彩语义:normal/secondary、working/blue、success/green、error/red、warning/orange
 enum StepAppearance: Equatable, Sendable {
     case normal
@@ -241,10 +259,17 @@ struct GitHubLoginService {
 
     // MARK: - JS 片段构造(值一律经 jsonEscaped,绝不字符串拼接注入)
 
-    /// 填 GitHub 登录表单(#login_field / #password)并提交;返回值为状态机提供确认信号:
+    /// 填 GitHub 登录表单并提交;返回值为状态机提供确认信号:
     /// - `filled`:本次注入填入并提交;
-    /// - `already-filled`:填入前值已一致(幂等,重试/自动填充场景),视为成功;
+    /// - `already-filled`:填入前值已一致(幂等,重试/自动填充场景)——裁决为「已填也提交」:
+    ///   与 `filled` 分支一样执行 `form.submit()`,消除「浏览器自动填充同值凭据但表单未提交」
+    ///   的残留风险(此前需用户手动点一下提交);
     /// - `no-form` / `no-login-field`:表单未就绪,由视图重试。
+    ///
+    /// 选择器按备用链回退(任一主+备组合命中即填并提交,全部未命中 → `no-login-field`):
+    /// 用户名:`#login_field` → `input[name="login"]` → 兜底 `input[type="text"]`;
+    /// 密码:`#password` → `input[name="password"]` → 兜底 `input[type="password"]`;
+    /// 兜底选择器仅当页面**恰有一个**匹配时启用(避免填错字段)。
     static func fillCredentialsJS(username: String, password: String) -> String {
         let user = jsonEscaped(username)
         let pass = jsonEscaped(password)
@@ -252,8 +277,14 @@ struct GitHubLoginService {
         (function() {
           var user = \(user);
           var pass = \(pass);
-          var u = document.getElementById('login_field');
-          var p = document.getElementById('password');
+          var u = document.getElementById('login_field')
+            || document.querySelector('input[name="login"]')
+            || (document.querySelectorAll('input[type="text"]').length === 1
+                ? document.querySelector('input[type="text"]') : null);
+          var p = document.getElementById('password')
+            || document.querySelector('input[name="password"]')
+            || (document.querySelectorAll('input[type="password"]').length === 1
+                ? document.querySelector('input[type="password"]') : null);
           if (u && p) {
             var already = u.value === user && p.value === pass;
             u.value = user; p.value = pass;
@@ -261,8 +292,8 @@ struct GitHubLoginService {
             p.dispatchEvent(new Event('input', {bubbles:true}));
             var form = u.closest('form') || p.closest('form') || document.querySelector('form');
             if (form) {
-              if (already) { return 'already-filled'; }
-              form.submit(); return 'filled';
+              form.submit();
+              return already ? 'already-filled' : 'filled';
             }
             return 'no-form';
           }
@@ -283,12 +314,28 @@ struct GitHubLoginService {
         """
     }
 
-    /// 填 2FA 验证码(#otp)并提交
+    /// 2FA 输入框选择器链 JS 表达式(按序尝试,任一命中即取用):
+    /// `#otp` → `input[name="otp"]` → `input[autocomplete="one-time-code"]` →
+    /// 兜底 `input[type="tel"]` / `input[inputmode="numeric"]`(仅当页面恰有一个)。
+    /// `fillOTPJS` 与 `probeAndFillOTPJS` 共用,保证两处选择器行为一致。
+    private static func otpFieldExprJS() -> String {
+        """
+        document.getElementById('otp')
+          || document.querySelector('input[name="otp"]')
+          || document.querySelector('input[autocomplete="one-time-code"]')
+          || (document.querySelectorAll('input[type="tel"]').length === 1
+              ? document.querySelector('input[type="tel"]') : null)
+          || (document.querySelectorAll('input[inputmode="numeric"]').length === 1
+              ? document.querySelector('input[inputmode="numeric"]') : null)
+        """
+    }
+
+    /// 填 2FA 验证码并提交;选择器链见 `otpFieldExprJS()`(主 #otp + 备用 + 兜底)
     static func fillOTPJS(code: String) -> String {
         let value = jsonEscaped(code)
         return """
         (function() {
-          var otp = document.getElementById('otp');
+          var otp = \(otpFieldExprJS());
           if (!otp) { return 'no-otp'; }
           otp.value = \(value);
           otp.dispatchEvent(new Event('input', {bubbles:true}));
@@ -300,15 +347,13 @@ struct GitHubLoginService {
     }
 
     /// 探测内联 2FA 输入框并填码提交(GitHub 登录页内直接渲染 #otp 的形态,路径仍是
-    /// /login 或 /sessions):命中 `#otp` / `input[name="otp"]` / `input[autocomplete="one-time-code"]`
-    /// 任一选择器 → 填码并提交,返回 `otp-filled`;未命中返回 `no-otp`(视图按现有规则继续/转手动)
+    /// /login 或 /sessions):选择器链命中 → 填码并提交,返回 `otp-filled`;
+    /// 未命中返回 `no-otp`(视图按现有规则继续/转手动)
     static func probeAndFillOTPJS(code: String) -> String {
         let value = jsonEscaped(code)
         return """
         (function() {
-          var otp = document.getElementById('otp')
-            || document.querySelector('input[name="otp"]')
-            || document.querySelector('input[autocomplete="one-time-code"]');
+          var otp = \(otpFieldExprJS());
           if (!otp) { return 'no-otp'; }
           otp.value = \(value);
           otp.dispatchEvent(new Event('input', {bubbles:true}));
@@ -386,5 +431,48 @@ struct GitHubLoginService {
         case "otp-filled": return .filled
         default: return .notPresent
         }
+    }
+
+    // MARK: - 流程诊断时间线(可观测性,不含凭据)
+
+    /// 登录流程诊断时间线(纯逻辑,可单测):视图在每次 decide / 注入结果分类 /
+    /// OTP 探测 / cookie 轮询命中与超时时追加条目,失败/取消/超时时写入统一日志。
+    /// 安全红线:条目消息只允许流程状态(域名/步骤名/分类结果),绝不记录用户名、
+    /// 密码、验证码、cookie 值,也不记录 JS 片段(JS 内含凭据)。
+    struct LoginFlowLog: Sendable {
+        struct Entry: Sendable, Equatable {
+            let date: Date
+            let message: String
+        }
+
+        private(set) var entries: [Entry] = []
+
+        var isEmpty: Bool { entries.isEmpty }
+        var count: Int { entries.count }
+
+        /// 追加一条时间线记录(消息由调用方构造,不得含凭据)
+        mutating func log(_ message: String, at date: Date = Date()) {
+            entries.append(Entry(date: date, message: message))
+        }
+
+        /// 清空时间线(新流程开始)
+        mutating func clear() {
+            entries.removeAll()
+        }
+
+        /// 拼接为紧凑诊断文本(相对首条的时间偏移,秒),供 os_log 输出与测试断言
+        var timelineText: String {
+            guard let start = entries.first?.date else { return "(empty)" }
+            return entries.map { entry in
+                String(format: "%+.1fs %@", entry.date.timeIntervalSince(start), entry.message)
+            }.joined(separator: " | ")
+        }
+    }
+
+    /// 生成一次 decide 决策的安全诊断行:URL 域名 + 步骤转换。
+    /// 步骤只取 `flowName`(纯枚举名,不含关联值),绝不带出 cookie / 消息内容。
+    static func flowLogLine(url: URL?, from oldState: GitHubLoginStep, to newState: GitHubLoginStep) -> String {
+        let host = url?.host ?? "(nil)"
+        return "decide \(host): \(oldState.flowName) -> \(newState.flowName)"
     }
 }

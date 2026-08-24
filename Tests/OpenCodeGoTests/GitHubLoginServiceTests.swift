@@ -271,13 +271,60 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertFalse(js.contains("var user = \"a\"b"))
     }
 
-    /// 修复①:注入成功返回值须明确区分「已填并提交」与「幂等已填」
+    /// 修复①:注入成功返回值须明确区分「已填并提交」与「幂等已填」;
+    /// 裁决「已填也提交」:两个分支共用一次 form.submit(),再按是否幂等返回标记
     func testFillCredentialsJSReturnsDistinctSuccessMarkers() {
         let js = GitHubLoginService.fillCredentialsJS(username: "alice", password: "s3cret")
-        XCTAssertTrue(js.contains("return 'filled';"), "已填并提交应返回 filled")
-        XCTAssertTrue(js.contains("return 'already-filled';"), "值已一致(幂等)应返回 already-filled")
+        XCTAssertTrue(js.contains("return already ? 'already-filled' : 'filled';"),
+                      "已填与本次填入都返回成功标记,且共用同一次表单提交")
+        XCTAssertTrue(js.contains("form.submit()"), "必须执行表单提交")
         XCTAssertTrue(js.contains("return 'no-login-field';"), "表单未渲染应返回 no-login-field")
         XCTAssertTrue(js.contains("return 'no-form';"))
+    }
+
+    /// 裁决「已填也提交」:already-filled 分支的 form.submit() 必须出现在返回标记之前,
+    /// 而不是像旧实现那样提前 return 跳过提交(消除浏览器自动填充同值凭据但表单未提交的残留风险)
+    func testFillCredentialsJSAlreadyFilledStillSubmits() {
+        let js = GitHubLoginService.fillCredentialsJS(username: "alice", password: "s3cret")
+        guard let submit = js.range(of: "form.submit()"),
+              let already = js.range(of: "'already-filled'")
+        else {
+            return XCTFail("JS 应同时包含表单提交与 already-filled 标记")
+        }
+        XCTAssertLessThan(submit.lowerBound, already.lowerBound,
+                          "already-filled 分支也必须先 form.submit() 再返回标记")
+        XCTAssertEqual(js.ranges(of: "form.submit()").count, 1, "两个分支共用同一次表单提交")
+    }
+
+    // MARK: - 备用选择器链(选择器单点假设加固)
+
+    /// 修复②:主 #login_field/#password 之外须有 input[name="login"/"password"] 备用,
+    /// 以及仅当页面恰有一个匹配时启用的 type=text/password 兜底;任一主+备组合命中即填并提交
+    func testFillCredentialsJSIncludesFallbackSelectors() {
+        let js = GitHubLoginService.fillCredentialsJS(username: "u", password: "p")
+        XCTAssertTrue(js.contains(#"input[name="login"]"#), "应回退到 input[name=\"login\"]")
+        XCTAssertTrue(js.contains(#"input[name="password"]"#), "应回退到 input[name=\"password\"]")
+        XCTAssertTrue(js.contains(#"document.querySelectorAll('input[type="text"]').length === 1"#),
+                      "text 兜底仅当页面恰有一个时启用")
+        XCTAssertTrue(js.contains(#"document.querySelectorAll('input[type="password"]').length === 1"#),
+                      "password 兜底仅当页面恰有一个时启用")
+        XCTAssertTrue(js.contains("getElementById('login_field')"), "主选择器 #login_field 必须保留")
+        XCTAssertTrue(js.contains("getElementById('password')"), "主选择器 #password 必须保留")
+    }
+
+    /// 修复②:2FA 填码 JS 的选择器链须含 #otp / name / autocomplete / tel / numeric 回退
+    /// (fillOTPJS 与 probeAndFillOTPJS 共用同一链,行为一致)
+    func testFillOTPJSIncludesFallbackSelectors() {
+        for js in [GitHubLoginService.fillOTPJS(code: "123456"),
+                   GitHubLoginService.probeAndFillOTPJS(code: "123456")] {
+            XCTAssertTrue(js.contains("getElementById('otp')"), "主选择器 #otp 必须保留")
+            XCTAssertTrue(js.contains(#"input[name="otp"]"#))
+            XCTAssertTrue(js.contains(#"input[autocomplete="one-time-code"]"#))
+            XCTAssertTrue(js.contains(#"document.querySelectorAll('input[type="tel"]').length === 1"#),
+                          "tel 兜底仅当页面恰有一个时启用")
+            XCTAssertTrue(js.contains(#"document.querySelectorAll('input[inputmode="numeric"]').length === 1"#),
+                          "numeric 兜底仅当页面恰有一个时启用")
+        }
     }
 
     func testFillCredentialsJSNoScriptInjection() {
@@ -405,6 +452,82 @@ final class GitHubLoginServiceTests: XCTestCase {
             let decoded = try JSONSerialization.jsonObject(with: data) as? [String]
             XCTAssertEqual(decoded?.first, value, "转义结果必须能被 JSON 反解回原值: \(escaped)")
         }
+    }
+
+    // MARK: - 流程诊断时间线(可观测性,不含凭据)
+
+    func testLoginFlowLogAppendAndClear() {
+        var flow = GitHubLoginService.LoginFlowLog()
+        XCTAssertTrue(flow.isEmpty)
+        flow.log("decide github.com: idle -> loadingLoginPage")
+        flow.log("inject: filled -> success", at: Date(timeIntervalSince1970: 1000))
+        XCTAssertEqual(flow.count, 2)
+        XCTAssertFalse(flow.isEmpty)
+        XCTAssertTrue(flow.timelineText.contains("decide github.com"))
+        XCTAssertTrue(flow.timelineText.contains("filled -> success"))
+        flow.clear()
+        XCTAssertTrue(flow.isEmpty)
+        XCTAssertEqual(flow.timelineText, "(empty)")
+    }
+
+    func testLoginFlowLogTimelineTextKeepsOrder() {
+        var flow = GitHubLoginService.LoginFlowLog()
+        let start = Date(timeIntervalSince1970: 0)
+        flow.log("first", at: start)
+        flow.log("second", at: start.addingTimeInterval(1.5))
+        flow.log("third", at: start.addingTimeInterval(3))
+        let text = flow.timelineText
+        guard let first = text.range(of: "first"),
+              let second = text.range(of: "second"),
+              let third = text.range(of: "third")
+        else { return XCTFail("时间线应包含全部条目") }
+        XCTAssertLessThan(first.lowerBound, second.lowerBound, "条目按追加顺序输出")
+        XCTAssertLessThan(second.lowerBound, third.lowerBound)
+    }
+
+    /// 安全红线:即使 decide / JS 构造收到含敏感值的参数,时间线条目与输出也绝不包含
+    /// 用户名/密码/验证码/cookie 值(视图侧只记录域名/步骤名/分类结果)
+    func testLoginFlowLogNeverContainsCredentials() {
+        let username = "alice", password = "hunter2-s3cret", totp = "123456"
+        let cookie = "Fe26.2**top-secret-cookie"
+
+        var flow = GitHubLoginService.LoginFlowLog()
+        // 与 GitHubLoginView 实际打点一致:decide 诊断行 + 注入分类 + OTP 探测 + cookie 命中
+        let d = GitHubLoginService.decide(
+            for: url("https://github.com/login"), githubUsername: username,
+            githubPassword: password, totpCode: totp, state: .loadingLoginPage)
+        flow.log(GitHubLoginService.flowLogLine(
+            url: url("https://github.com/login"), from: .loadingLoginPage, to: d.step))
+        flow.log("inject: filled -> \(GitHubLoginService.classifyCredentialInjectResult("filled"))")
+        flow.log("otp-probe: no-otp -> \(GitHubLoginService.classifyOTPProbeResult("no-otp"))")
+        flow.log("cookie: poll hit")
+        // 含关联值的状态(如 .done(authCookie:))也必须以纯枚举名出现(flowName)
+        flow.log("decide opencode.ai: waitingOAuthRedirect -> \(GitHubLoginStep.done(authCookie: cookie).flowName)")
+
+        let text = flow.timelineText
+        XCTAssertFalse(text.contains(username), "时间线不得含用户名")
+        XCTAssertFalse(text.contains(password), "时间线不得含密码")
+        XCTAssertFalse(text.contains(totp), "时间线不得含验证码")
+        XCTAssertFalse(text.contains(cookie), "时间线不得含 cookie 值")
+
+        // 前置:JS 片段确实嵌入了凭据;但时间线只记录分类,绝不能把 JS 片段或原始返回值写进去
+        let js = GitHubLoginService.fillCredentialsJS(username: username, password: password)
+        XCTAssertTrue(js.contains(password), "前置断言:JS 内确实嵌入了凭据")
+        XCTAssertFalse(text.contains("var user"), "时间线不得包含 JS 片段")
+    }
+
+    func testFlowLogLineUsesDomainAndFlowNameOnly() {
+        let line = GitHubLoginService.flowLogLine(
+            url: url("https://github.com/sessions/two-factor"),
+            from: .fillingCredentials, to: .needsManualIntervention("请手动完成"))
+        XCTAssertEqual(line, "decide github.com: fillingCredentials -> needsManualIntervention",
+                       "诊断行只含域名与纯枚举名,不带出消息内容")
+
+        let doneLine = GitHubLoginService.flowLogLine(
+            url: url("https://opencode.ai"), from: .waitingOAuthRedirect, to: .done(authCookie: "Fe26.2**x"))
+        XCTAssertEqual(doneLine, "decide opencode.ai: waitingOAuthRedirect -> done",
+                       ".done 的关联值(cookie)绝不能出现在诊断行")
+        XCTAssertFalse(doneLine.contains("Fe26"))
     }
 
     // MARK: - 辅助
