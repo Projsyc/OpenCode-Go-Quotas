@@ -7,7 +7,7 @@ set -euo pipefail
 
 # ---- 变量置顶(按需修改) ----
 APP_NAME="OpenCodeGo"
-BUNDLE_ID="com.acccan.opencode-go"
+BUNDLE_ID="${BUNDLE_ID:-com.acccan.opencode-go}"
 VERSION="1.0.0"
 MIN_OS="14.0"
 CONFIGURATION="${1:-release}"
