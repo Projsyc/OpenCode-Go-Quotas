@@ -40,33 +40,13 @@ enum TOTPGenerator {
         return Int(Int64(period) - remainder)
     }
 
-    /// base32 解码:忽略空白与 `=` padding;大小写均可;非法字符返回 nil。
-    /// 宽松模式(历史兼容),仅供识别性判定复用;验证码生成请用 `decodeBase32Strict`。
-    static func decodeBase32(_ input: String) -> Data? {
-        var buffer: UInt32 = 0
-        var bits = 0
-        var out = Data()
-        for byte in input.uppercased().utf8 {
-            // 跳过空白(空格/Tab/换行)与 '=' padding
-            if byte == 61 || byte == 32 || byte == 9 || byte == 10 || byte == 13 { continue }
-            guard let value = base32Values[byte] else { return nil }
-            buffer = (buffer << 5) | UInt32(value)
-            bits += 5
-            if bits >= 8 {
-                bits -= 8
-                out.append(UInt8((buffer >> bits) & 0xff))
-            }
-        }
-        return out.isEmpty ? nil : out
-    }
-
-    /// RFC 4648 严格 base32 解码:供验证码生成与凭据类型判定使用。
-    /// 相对 `decodeBase32` 的差异(截断/非法输入的 secret 不再"成功"解码):
+    /// RFC 4648 严格 base32 解码:唯一解码入口,供验证码生成与凭据类型判定使用。
+    /// 宽松版解码已删除(全仓无调用点),截断/非法 padding 的输入一律拒绝:
     /// - '=' 仅允许出现在尾部,出现后不得再有数据字符;数据字符数 N 需满足
     ///   N % 8 ∈ {6, 7, 0}(规范编码所需 padding 为 0/1/2 个,即「数量 ≤ 2」);
     ///   完整块(0 padding)后的冗余尾部 '=' 容忍,与既有样本兼容;
     /// - 尾部残余位必须全为 0(非 0 视为截断/非规范编码,返回 nil);
-    /// - 空白与大小写容忍、空结果返回 nil 与宽松版一致。
+    /// - 空白与大小写容忍、空结果返回 nil。
     static func decodeBase32Strict(_ input: String) -> Data? {
         var buffer: UInt32 = 0
         var bits = 0

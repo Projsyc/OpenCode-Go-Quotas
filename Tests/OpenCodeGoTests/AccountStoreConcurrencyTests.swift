@@ -314,6 +314,20 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         XCTAssertNil(reloaded.loadError)
     }
 
+    /// L3:损坏加载置 loadError 后,首次成功 save()(addAccount)即清空 → 红条会话内可消除
+    func testLoadErrorClearedAfterFirstSuccessfulSave() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        try Data("broken".utf8).write(to: t.fileURL)
+
+        let store = AccountStore(client: makeClient(), keychain: InMemoryKeychain(), fileURL: t.fileURL)
+        XCTAssertNotNil(store.loadError) // 损坏加载 → 红条显示
+
+        // addAccount 触发首次成功 save() → 同一 store 的 loadError 必须清空(红条消除)
+        _ = try store.addAccount(name: "新账号", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        XCTAssertNil(store.loadError)
+    }
+
     /// 文件不存在(首次运行)→ 空列表,无 loadError
     func testLoadMissingFileHasNoLoadError() throws {
         let t = makeTempStore()
