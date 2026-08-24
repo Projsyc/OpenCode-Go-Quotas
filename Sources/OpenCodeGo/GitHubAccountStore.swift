@@ -134,9 +134,17 @@ final class GitHubAccountStore {
             notes: notes,
             credentialKind: kind,
             lastCodeAt: kind == .oneTimeCode ? Date() : nil)
-        try keychain.set(pwd, forKey: key("password", account.id))
-        if let credential {
-            try keychain.set(credential, forKey: key("credential", account.id))
+        // Keychain 写入前置:任一 set 失败即回滚已写入项并抛错,内存/磁盘均不变,
+        // 不留孤儿 Keychain 条目
+        let passwordKey = key("password", account.id)
+        do {
+            try keychain.set(pwd, forKey: passwordKey)
+            if let credential {
+                try keychain.set(credential, forKey: key("credential", account.id))
+            }
+        } catch {
+            keychain.delete(passwordKey)   // 回滚第一项(失败时此项可能已写入)
+            throw error
         }
         accounts.append(account)
         save()
@@ -161,14 +169,29 @@ final class GitHubAccountStore {
         if accounts.contains(where: { $0.id != id && $0.username.lowercased() == name.lowercased() }) {
             throw GitHubAccountStoreError.duplicateUsername(name)
         }
+        // Keychain 写入前置:写失败时内存/磁盘均未变更(避免"内存已变但 Keychain 抛错"的半更新态);
+        // credential 写失败时回滚已写入的 password(用旧值还原或删除)
+        let oldPassword = keychain.get(key("password", id))
+        do {
+            if let pwd = password?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                try keychain.set(pwd, forKey: key("password", id))
+            }
+            if let cred = credential {
+                try keychain.set(cred, forKey: key("credential", id))
+            }
+        } catch {
+            if let oldPassword {
+                try? keychain.set(oldPassword, forKey: key("password", id))
+            } else {
+                keychain.delete(key("password", id))
+            }
+            throw error
+        }
+        // Keychain 全部写入成功后才改内存
         accounts[i].username = name
         accounts[i].notes = notes
         accounts[i].updatedAt = Date()
-        if let pwd = password?.trimmingCharacters(in: .whitespacesAndNewlines) {
-            try keychain.set(pwd, forKey: key("password", id))
-        }
-        if let cred = credential {
-            try keychain.set(cred, forKey: key("credential", id))
+        if credential != nil {
             if let kind { accounts[i].credentialKind = kind }
             if accounts[i].credentialKind == .oneTimeCode { accounts[i].lastCodeAt = Date() }
         } else if let kind {
@@ -236,7 +259,13 @@ final class GitHubAccountStore {
                     lastCodeAt: kind == .oneTimeCode ? Date() : nil)
                 do {
                     try keychain.set(pwd, forKey: key("password", account.id))
-                    try keychain.set(credential, forKey: key("credential", account.id))
+                    do {
+                        try keychain.set(credential, forKey: key("credential", account.id))
+                    } catch {
+                        // 第二项写失败时回滚第一项,不留孤儿 Keychain 条目
+                        keychain.delete(key("password", account.id))
+                        throw error
+                    }
                 } catch {
                     skipped.append(GitHubImportSkip(
                         lineNumber: row.lineNumber,

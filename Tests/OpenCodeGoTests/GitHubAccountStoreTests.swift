@@ -85,6 +85,38 @@ final class GitHubAccountStoreTests: XCTestCase {
         }
     }
 
+    /// L8:add 中第二项 Keychain 写入失败 → 回滚第一项,不留孤儿条目,内存不变
+    func testAddKeychainFailureRollsBackPassword() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        t.keychain.failPredicate = { $0.hasSuffix("-credential") }   // 模拟 credential 写入失败
+        XCTAssertThrowsError(try t.store.add(
+            username: "octocat", password: "P@ssw0rd-1",
+            credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
+        XCTAssertTrue(t.store.accounts.isEmpty)
+        // 不得留下孤儿 <uuid>-password Keychain 条目
+        XCTAssertTrue(t.keychain.storage.allSatisfy { !$0.key.hasSuffix("-password") },
+                      "失败的 add 不应在 Keychain 留下孤儿条目")
+    }
+
+    /// L8:update 中 Keychain 写入失败 → 内存不变(写入前置),且已写的 password 被回滚
+    func testUpdateKeychainFailureLeavesMemoryUntouched() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        let account = try t.store.add(username: "octocat", password: "P@ssw0rd-1")
+        t.keychain.failPredicate = { $0.hasSuffix("-credential") }
+        XCTAssertThrowsError(try t.store.update(
+            account.id, username: "renamed", notes: "新备注",
+            password: "NewP@ss-123", credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
+        // 内存不变:用户名/备注/类型均未应用
+        XCTAssertEqual(t.store.accounts[0].username, "octocat")
+        XCTAssertEqual(t.store.accounts[0].notes, "")
+        XCTAssertNil(t.store.accounts[0].credentialKind)
+        // Keychain 回滚:密码仍是旧值,凭据未写入
+        XCTAssertEqual(t.store.password(for: account), "P@ssw0rd-1")
+        XCTAssertNil(t.store.credential(for: account))
+    }
+
     func testUpdate() throws {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
@@ -223,5 +255,22 @@ final class GitHubAccountStoreTests: XCTestCase {
         XCTAssertEqual(summary.imported, 0)
         XCTAssertEqual(summary.skipped.count, 1)
         XCTAssertTrue(summary.skipped[0].reason.hasPrefix("凭据写入失败"))
+    }
+
+    /// L8:批量导入中 credential 写失败 → 回滚该行已写的 password,不留孤儿条目
+    func testImportBatchKeychainFailureLeavesNoOrphan() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        let rows = [
+            GitHubImportRow(lineNumber: 1, username: "u1", password: "pass123456",
+                            credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret),
+        ]
+        t.keychain.failPredicate = { $0.hasSuffix("-credential") }  // 模拟第二项写入失败
+        let summary = try t.store.importBatch(rows)
+        XCTAssertEqual(summary.imported, 0)
+        XCTAssertEqual(summary.skipped.count, 1)
+        XCTAssertTrue(summary.skipped[0].reason.hasPrefix("凭据写入失败"))
+        // 该行被跳过,不得留下孤儿 <uuid>-password 条目
+        XCTAssertTrue(t.keychain.storage.allSatisfy { !$0.key.hasSuffix("-password") })
     }
 }
