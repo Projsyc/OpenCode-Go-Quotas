@@ -6,17 +6,18 @@
 #   bash spawn-scanner.sh <scope> <scanDirAbs>
 #
 #   <scope>      docs | frontend | backend | db | data | all (comma-separated allowed)
-#   <scanDirAbs> where scan-report.md + scan-stdout.log land,
-#                e.g. <quality_scans_dir>/20260819-docs
+#   <scanDirAbs> where scan-stdout.log lands; the report goes to the repo root as
+#                SCAN-REPORT-<basename>.md — repo-root filenames are writable for
+#                headless agents, while nested .claude/boss/ paths are not.
 #
 # The scanner runs in the main repo (cwd = repo root) from a clean context. It is
-# strictly read-only: its only writable file is <scanDirAbs>/scan-report.md
+# strictly read-only: its only writable file is the SCAN-REPORT at repo root
 # (Write:<reportPath> is the sole write allow). Run with the Bash tool
 # run_in_background=true so the boss gets a completion notification when done.
 set -euo pipefail
 SCOPE="$1"; SCANDIR="$2"
-REPORT="$SCANDIR/scan-report.md"
 MAIN="$(git rev-parse --show-toplevel)"
+REPORT="$MAIN/SCAN-REPORT-$(basename "$SCANDIR").md"
 
 mkdir -p "$SCANDIR"
 cd "$MAIN"
