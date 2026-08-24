@@ -11,6 +11,8 @@ struct GitHubAccountCardView: View {
     @State private var confirmingDelete = false
     @State private var copied: CopiedTarget?
     @State private var secret: String?
+    /// 剪贴板延迟清理任务(复制后 45s 清除;新复制或视图消失时取消)
+    @State private var clipboardCleanupTask: Task<Void, Never>?
 
     private enum CopiedTarget { case code, password }
 
@@ -58,6 +60,7 @@ struct GitHubAccountCardView: View {
         .task(id: account.updatedAt) {
             secret = store.credential(for: account)
         }
+        .onDisappear { clipboardCleanupTask?.cancel() }
         .sheet(isPresented: $showingEdit) { GitHubEditView(account: account) }
         .confirmationDialog(
             "删除 GitHub 账号「\(account.username)」?将同时删除本机保存的密码与验证码凭据。",
@@ -207,10 +210,20 @@ struct GitHubAccountCardView: View {
             }
             copy(value, as: target)
         } label: {
-            Label(copied == target ? "已复制" : label, systemImage: copied == target ? "checkmark" : icon)
+            Label(copied == target ? copiedLabel(for: target) : label,
+                  systemImage: copied == target ? "checkmark" : icon)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+        .help("复制到剪贴板,45 秒后自动清除")
+    }
+
+    /// 复制成功后的按钮文案:提示剪贴板会延迟自动清除;复制密码时提示更明确
+    private func copiedLabel(for target: CopiedTarget) -> String {
+        switch target {
+        case .code: return "已复制,45 秒后自动清除"
+        case .password: return "密码已复制,45 秒后自动清除"
+        }
     }
 
     private func iconButton(_ systemImage: String, help: String, destructive: Bool = false,
@@ -244,9 +257,23 @@ struct GitHubAccountCardView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
         withAnimation(.easeOut(duration: 0.15)) { copied = target }
+        scheduleClipboardCleanup(value)
         Task {
             try? await Task.sleep(for: .seconds(1.5))
             if copied == target { copied = nil }
+        }
+    }
+
+    /// 复制明文密码 / 验证码后延迟清理:45s 后仅当剪贴板内容仍是本次复制的值时清除,
+    /// 避免误清用户之后复制的内容;新复制或视图消失时取消
+    private func scheduleClipboardCleanup(_ value: String) {
+        clipboardCleanupTask?.cancel()
+        clipboardCleanupTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(45))
+            guard !Task.isCancelled else { return }
+            if NSPasteboard.general.string(forType: .string) == value {
+                NSPasteboard.general.clearContents()
+            }
         }
     }
 }
