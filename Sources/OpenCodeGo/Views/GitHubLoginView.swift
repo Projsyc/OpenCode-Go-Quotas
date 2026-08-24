@@ -1,3 +1,4 @@
+import os
 import SwiftUI
 import WebKit
 
@@ -45,7 +46,13 @@ struct GitHubLoginView: View {
     @State private var injectionTask: Task<Void, Never>?
     /// 凭据注入重试中(表单未渲染):状态保持 .githubLoginForm,状态栏显示「等待表单渲染…」
     @State private var isWaitingFormRender = false
+    /// 流程诊断时间线(不含凭据),失败/取消/超时时写入统一日志
+    @State private var flowLog = GitHubLoginService.LoginFlowLog()
+    /// 时间线已写入日志(避免同一流程重复输出,onDisappear 幂等兜底)
+    @State private var flowLogDumped = false
 
+    /// 统一日志(subsystem 固定,用户可用 `log show --predicate 'subsystem == "com.acccan.opencode-go"'` 提取)
+    private let logger = Logger(subsystem: "com.acccan.opencode-go", category: "github-login")
     private let service = GitHubLoginService()
     private static let loginTimeout: Duration = .seconds(300)
 
@@ -77,6 +84,9 @@ struct GitHubLoginView: View {
             // 不会走到 wipeStore,这里全清 nonPersistent 会话,不留 Cookie 残留。
             // removeData 幂等,与其余清理路径重复调用安全。
             wipeStore()
+            // 窗口直接关闭等未走 cancel()/超时的路径也留痕(dumpFlowLog 幂等,
+            // 成功/取消/超时已输出过的不会重复)
+            dumpFlowLog()
             // 断环(WebView 泄漏修复):强引用链为
             //   @State 存储 → navigator → onFinish 闭包 → self(struct) → @State 存储
             //  → { navigator, webView }
@@ -171,6 +181,8 @@ struct GitHubLoginView: View {
 
     @MainActor
     private func start() {
+        flowLog.log("flow start")
+        flowLogDumped = false
         fetchCredentials()
         let navigator = LoginNavigator { url in
             Task { @MainActor in
@@ -218,6 +230,7 @@ struct GitHubLoginView: View {
     @MainActor
     private func handleNavigation(to url: URL?) {
         guard !succeeded else { return }
+        let previousStep = currentStep
 
         let decision = GitHubLoginService.decide(
             for: url,
@@ -228,6 +241,8 @@ struct GitHubLoginView: View {
 
         // 同一 URL + 同一决策不重复处理(didFinish 可能对同一页面重复回调)
         if decision == lastDecision, lastDecidedURL == url { return }
+        // 诊断打点:URL 域名 + 步骤转换(flowLogLine 只取域名与枚举名,不含凭据)
+        flowLog.log(GitHubLoginService.flowLogLine(url: url, from: previousStep, to: decision.step))
         // 新决策:页面上下文已变化,取消上一轮未完成的注入(凭据重试 / OTP 探测)
         cancelPendingInjection()
         lastDecision = decision
@@ -310,15 +325,19 @@ struct GitHubLoginView: View {
         switch GitHubLoginService.classifyCredentialInjectResult(rawResult) {
         case .success:
             // 确认注入成功后才推进状态(修复①:不再提前置位 .fillingCredentials)
+            flowLog.log("inject: \(rawResult ?? "js-error") -> success")
             isWaitingFormRender = false
             currentStep = .fillingCredentials
         case .retry:
             guard attempt < GitHubLoginService.credentialInjectMaxRetries else {
                 // 5 次重试后仍无表单:转手动而不是死等 5 分钟超时
+                flowLog.log("inject: retry 耗尽(共 \(attempt + 1) 次) -> 转手动")
+                dumpFlowLog()
                 isWaitingFormRender = false
                 currentStep = .needsManualIntervention("页面未按预期渲染,请在窗口中手动登录")
                 return
             }
+            flowLog.log("inject: \(rawResult ?? "js-error") -> retry(\(attempt + 1)/\(GitHubLoginService.credentialInjectMaxRetries))")
             isWaitingFormRender = true
             injectCredentials(js: js, attempt: attempt + 1)
         }
@@ -350,12 +369,16 @@ struct GitHubLoginView: View {
         switch GitHubLoginService.classifyOTPProbeResult(rawResult) {
         case .filled:
             // 已填码并提交 → 进入等待 2FA 结果阶段
+            flowLog.log("otp-probe: \(rawResult ?? "js-error") -> filled")
             currentStep = .twoFactor
         case .notPresent:
+            flowLog.log("otp-probe: \(rawResult ?? "js-error") -> notPresent")
             // 未命中:URL 是登录/会话页且凭据已提交 → 无内联 2FA = 登录未成功 → 转手动;
             // 其他 github 页面 → 按现有规则继续(不打断)
             let path = url?.path.lowercased() ?? ""
             if path.contains("/login") || path.contains("/session") {
+                flowLog.log("otp-probe: 登录页无内联 OTP -> 转手动")
+                dumpFlowLog()
                 currentStep = .needsManualIntervention("GitHub 登录未成功,请在窗口中手动登录")
             }
         }
@@ -404,6 +427,7 @@ struct GitHubLoginView: View {
             Task { @MainActor in
                 guard !self.succeeded else { return }
                 if let cookie = GitHubLoginService.extractAuthCookie(from: cookies) {
+                    self.flowLog.log("cookie: poll hit")
                     self.succeed(cookie: cookie)
                 }
             }
@@ -418,6 +442,8 @@ struct GitHubLoginView: View {
         succeeded = true
         stopPolling()
         stopTimeout()
+        flowLog.log("success: cookie captured")
+        dumpFlowLog()
         wipeStore()
         currentStep = .done(authCookie: cookie)
         onAuthCookie(cookie)
@@ -432,6 +458,8 @@ struct GitHubLoginView: View {
         guard !succeeded else { return }
         stopPolling()
         stopTimeout()
+        flowLog.log("cancelled")
+        dumpFlowLog()
         wipeStore()
         onCancel?()
         dismiss()
@@ -444,6 +472,8 @@ struct GitHubLoginView: View {
             try? await Task.sleep(for: Self.loginTimeout)
             guard !Task.isCancelled, !succeeded else { return }
             stopPolling()
+            flowLog.log("timeout: 300s 无进展")
+            dumpFlowLog()
             wipeStore()
             currentStep = .failed("登录超时(5 分钟无进展),请取消后重试")
         }
@@ -460,6 +490,16 @@ struct GitHubLoginView: View {
         webView.configuration.websiteDataStore.removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast) { }
+    }
+
+    /// 把流程时间线写入统一日志(每流程最多一次)。
+    /// 时间线条目已按 GitHubLoginService.LoginFlowLog 红线过滤凭据(只含域名/步骤名/
+    /// 分类结果),整行标 public 以便 `log show --predicate 'subsystem == "com.acccan.opencode-go"'`
+    /// 在真机/本机均可采集;失败/取消/超时/转手动/关闭窗口时调用。
+    private func dumpFlowLog() {
+        guard !flowLogDumped else { return }
+        flowLogDumped = true
+        logger.info("login flow: \(self.flowLog.timelineText, privacy: .public)")
     }
 }
 
