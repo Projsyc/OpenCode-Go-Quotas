@@ -5,7 +5,7 @@ import XCTest
 // MARK: - Mock URLProtocol
 
 final class MockURLProtocol: URLProtocol {
-    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (URLResponse, Data))?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -154,6 +154,22 @@ final class QuotaClientTests: XCTestCase {
         }
     }
 
+    func testFetchGoQuotaNonHTTPResponseThrowsHttpError() async {
+        // 非 HTTP 响应不应触发强制转换崩溃,而是转为 httpError(-1)
+        MockURLProtocol.handler = { request in
+            (URLResponse(url: request.url!, mimeType: nil, expectedContentLength: 0, textEncodingName: nil),
+             Data(quotaHTML.utf8))
+        }
+        do {
+            _ = try await makeClient().fetchGoQuota(workspaceId: validWorkspace, authCookie: validCookie)
+            XCTFail("应当抛出错误")
+        } catch let e as QuotaError {
+            guard case .httpError(-1) = e else { return XCTFail("期望 httpError(-1),实际 \(e)") }
+        } catch {
+            XCTFail("意外错误类型 \(error)")
+        }
+    }
+
     // MARK: 用量历史
 
     func testFetchGoUsageHistoryParsesRecordsAndSortsDesc() async throws {
@@ -239,6 +255,22 @@ final class QuotaClientTests: XCTestCase {
             XCTFail("应当抛出错误")
         } catch let e as QuotaError {
             guard case .sessionExpired = e else { return XCTFail("期望 sessionExpired,实际 \(e)") }
+        } catch {
+            XCTFail("意外错误类型 \(error)")
+        }
+    }
+
+    func testFetchGoUsageHistoryNonHTTPResponseThrowsHttpError() async {
+        MockURLProtocol.handler = { request in
+            (URLResponse(url: request.url!, mimeType: nil, expectedContentLength: 0, textEncodingName: nil),
+             Data(historyBody.utf8))
+        }
+        do {
+            _ = try await makeClient().fetchGoUsageHistory(
+                workspaceId: validWorkspace, authCookie: validCookie)
+            XCTFail("应当抛出错误")
+        } catch let e as QuotaError {
+            guard case .httpError(-1) = e else { return XCTFail("期望 httpError(-1),实际 \(e)") }
         } catch {
             XCTFail("意外错误类型 \(error)")
         }
