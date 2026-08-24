@@ -56,6 +56,22 @@ final class GitHubLoginViewTests: XCTestCase {
         }
     }
 
+    // MARK: - 启动加载阶段守护超时(b23 审计 #9)
+
+    /// 契约:start() 起 15s 内未到达首个关键步骤(进入 github 登录页/授权页,
+    /// 即离开 idle/loadingLoginPage)→ 判失败。阶段超时只覆盖启动加载段,
+    /// 必须明显短于全局 300s 无进展超时;阶段达成后由全局超时继续兜底
+    func testLoginStageTimeoutContract() {
+        XCTAssertEqual(GitHubLoginView.loginStageTimeout, .seconds(15),
+                       "启动加载阶段守护超时 = 15s")
+        XCTAssertLessThan(GitHubLoginView.loginStageTimeout, GitHubLoginView.loginTimeout,
+                          "阶段超时必须短于全局 300s 无进展超时(阶段内不依赖全局超时)")
+        XCTAssertTrue(GitHubLoginView.loginStageTimeoutMessage.contains("登录页加载超时"),
+                      "失败文案须明确「登录页加载超时」")
+        XCTAssertTrue(GitHubLoginView.loginStageTimeoutMessage.contains("15s"),
+                      "失败文案须带超时时长,用户可据此判断重试")
+    }
+
     // MARK: - readCookiesJS 结果(JSON 串)
 
     func testInjectOneShotShouldRetryReadCookiesJSON() {
