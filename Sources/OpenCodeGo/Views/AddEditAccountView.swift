@@ -31,6 +31,8 @@ struct AddEditAccountView: View {
     @State private var selectedGitHubAccountID: UUID?
     @State private var showGitHubLogin = false
     @State private var loginMessage: String?
+    /// 自动保存查重:同 sheet 会话内已自动保存成功 → 再次触发只回填+提示,不再保存
+    @State private var autoSaved = false
 
     private enum Field: Hashable {
         case cookie
@@ -395,13 +397,36 @@ struct AddEditAccountView: View {
         authCookie = ""
     }
 
+    /// 自动保存前的查重决策(纯函数,便于单测):
+    /// - 同 sheet 已自动保存成功(autoSaved)→ 不再保存(防同 sheet 重触发);
+    /// - 识别到的 ws 已被现有账号占用 → 不再保存(防跨 sheet/历史重复);
+    /// - ws 为未识别(nil)→ 不在此判定,放行由 save() 校验并给出
+    ///   既有「未识别到 Workspace ID」提示;
+    /// - 其余 → 正常自动保存。
+    static func autoSaveDecision(
+        autoSaved: Bool,
+        workspaceId: String?,
+        existingWorkspaceIds: [String]
+    ) -> AutoSaveDecision {
+        if autoSaved { return .alreadySaved }
+        if let ws = workspaceId, existingWorkspaceIds.contains(ws) { return .duplicateWorkspace }
+        return .save
+    }
+
+    /// 自动保存查重决策结果
+    enum AutoSaveDecision: Equatable {
+        case save
+        case alreadySaved
+        case duplicateWorkspace
+    }
+
     /// 登录成功回调(由 GitHubLoginView 在捕获 cookie 时触发):
     /// 1. 回填 authCookie;回调带回了 workspaceId → 同步回填(登录起点可留空 ws);
     /// 2. 名称为空 → 用 GitHub 用户名兜底;
-    /// 3. 新增场景(account == nil)自动保存并关闭 sheet —— 即「导入 GitHub 账号后
-    ///    登录成功自动产生 opencode 账号」(store.addAccount 不去重:同 cookie 重复 add
-    ///    会追加重复账号,故自动保存成功后立即 dismiss;用户重开表单才再走手动流程,
-    ///    重复窗口极小且结果幂等可删,不做额外去重);
+    /// 3. 新增场景(account == nil)自动保存,保存前查重:
+    ///    - 同 sheet 已自动保存过 → 只提示「已保存过 ✅」,不再保存;
+    ///    - 识别到的 ws 已被现有账号占用 → 提示改用手动添加,不自动保存;
+    ///    - 其余 → 保存成功后置位 autoSaved 并延迟关闭 sheet。
     ///    保存失败(ws 仍缺/无效等)不静默:提示具体错误并保持表单打开可修正。
     ///    编辑场景(account != nil)不自动保存,只回填(保持现状)。
     private func handleAuthCookie(_ cookie: String, workspaceId ws: String?, githubUsername: String) {
@@ -415,22 +440,34 @@ struct AddEditAccountView: View {
             name = githubUsername
         }
         guard !isEditing else { return }
-        do {
-            try save()
-            loginMessage = "已自动保存账号 ✅"
-            // 自动保存成功后关闭添加表单(延迟展示成功提示;GitHubLoginView 自身也会在
-            // 1s 后 dismiss 自己,双 dismiss 幂等)。自动保存与手点「添加」并行时,
-            // 后者会在表单关闭前多写一条重复账号 —— 概率极低且用户可直接删除,故不拦截。
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(600))
-                dismiss()
-            }
-        } catch {
-            loginMessage = nil
-            if workspaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                errorText = "未识别到 Workspace ID,请手动填写后点「添加」"
-            } else {
-                errorText = "自动保存失败:\(error.localizedDescription)"
+        switch Self.autoSaveDecision(
+            autoSaved: autoSaved,
+            workspaceId: ws,
+            existingWorkspaceIds: store.accounts.map(\.workspaceId)
+        ) {
+        case .alreadySaved:
+            loginMessage = "已保存过 ✅"
+        case .duplicateWorkspace:
+            loginMessage = "该 Workspace ID 已有账号;请在列表中使用,或更改名称后手动添加"
+        case .save:
+            do {
+                try save()
+                autoSaved = true
+                loginMessage = "已自动保存账号 ✅"
+                // 自动保存成功后关闭添加表单(延迟展示成功提示;GitHubLoginView 自身也会在
+                // 1s 后 dismiss 自己,双 dismiss 幂等)。自动保存与手点「添加」并行时,
+                // 后者会在表单关闭前多写一条重复账号 —— 概率极低且用户可直接删除,故不拦截。
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(600))
+                    dismiss()
+                }
+            } catch {
+                loginMessage = nil
+                if workspaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    errorText = "未识别到 Workspace ID,请手动填写后点「添加」"
+                } else {
+                    errorText = "自动保存失败:\(error.localizedDescription)"
+                }
             }
         }
     }
