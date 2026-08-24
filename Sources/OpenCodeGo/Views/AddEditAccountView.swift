@@ -13,12 +13,26 @@ struct AddEditAccountView: View {
     @State private var notes = ""
     @State private var showCookie = false
     @State private var errorText: String?
+    @FocusState private var focusedField: Field?
+    /// 填入 Cookie 后高亮描边(1.5s 淡出)
+    @State private var cookieFlash = false
 
     // 浏览器导入
     @State private var importBrowser: BrowserCookieService.Browser = .chrome
     @State private var candidates: [BrowserCookieService.Candidate] = []
     @State private var importMessage: String?
     @State private var importChecked = false
+    @State private var hoveredCandidate: String?
+
+    private enum Field: Hashable {
+        case cookie
+    }
+
+    private enum FieldStatus: Equatable {
+        case idle(text: String)
+        case valid(text: String)
+        case invalid(text: String)
+    }
 
     private var isEditing: Bool { account != nil }
 
@@ -43,9 +57,7 @@ struct AddEditAccountView: View {
                     .textFieldStyle(.roundedBorder)
                     .textContentType(.none)
                     .autocorrectionDisabled()
-                Text("形如 wrk_xxxx，来自 opencode.ai 工作区页面")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                statusRow(workspaceStatus)
 
                 HStack {
                     Group {
@@ -58,6 +70,11 @@ struct AddEditAccountView: View {
                     .font(.system(.body, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .cookie)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Color.blue, lineWidth: 1.5)
+                            .opacity(cookieFlash ? 1 : 0))
 
                     Button {
                         showCookie.toggle()
@@ -66,9 +83,7 @@ struct AddEditAccountView: View {
                     }
                     .help(showCookie ? "隐藏 Cookie" : "显示 Cookie")
                 }
-                Text("以 Fe26. 开头；也可在上方从浏览器一键获取")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                statusRow(cookieStatus)
 
                 TextField("备注（可选）", text: $notes)
                     .textFieldStyle(.roundedBorder)
@@ -159,12 +174,20 @@ struct AddEditAccountView: View {
                         Button("填入") {
                             authCookie = candidate.value
                             importMessage = "已填入表单 ✅"
+                            flashCookieField()
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
                     .padding(8)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+                    .contentShape(RoundedRectangle(cornerRadius: 10))
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color.primary.opacity(hoveredCandidate == candidate.id ? 0.08 : 0.04)))
+                    .onHover { hovering in
+                        hoveredCandidate = hovering ? candidate.id : nil
+                    }
+                    .animation(.easeOut(duration: 0.15), value: hoveredCandidate)
                 }
             }
 
@@ -207,7 +230,64 @@ struct AddEditAccountView: View {
         }
     }
 
-    // MARK: - 表单
+    // MARK: - 实时校验
+
+    /// 输入为空时保持中性提示;非空则即时校验(✓ / ✗)
+    private var workspaceStatus: FieldStatus {
+        let ws = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ws.isEmpty {
+            return .idle(text: "形如 wrk_xxxx，来自 opencode.ai 工作区页面")
+        }
+        if let err = QuotaClient.validateWorkspaceId(ws) {
+            return .invalid(text: err)
+        }
+        return .valid(text: "格式正确")
+    }
+
+    /// Cookie 仅非空时校验;编辑模式留空表示不修改
+    private var cookieStatus: FieldStatus {
+        let c = authCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        if c.isEmpty {
+            return .idle(text: isEditing
+                ? "留空表示不修改 Cookie；以 Fe26. 开头，也可在上方从浏览器一键获取"
+                : "以 Fe26. 开头；也可在上方从浏览器一键获取")
+        }
+        if let err = QuotaClient.validateAuthCookie(c) {
+            return .invalid(text: err)
+        }
+        return .valid(text: "格式正确")
+    }
+
+    private func statusRow(_ status: FieldStatus) -> some View {
+        HStack(spacing: 4) {
+            switch status {
+            case .idle(let text):
+                Text(text)
+                    .foregroundStyle(.secondary)
+            case .valid(let text):
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text(text)
+                    .foregroundStyle(.green)
+            case .invalid(let text):
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+                Text(text)
+                    .foregroundStyle(.red)
+            }
+        }
+        .font(.caption)
+    }
+
+    /// 填入成功后聚焦 Cookie 字段并高亮描边,1.5s 淡出
+    private func flashCookieField() {
+        focusedField = .cookie
+        cookieFlash = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            withAnimation(.easeOut(duration: 1.5)) { cookieFlash = false }
+        }
+    }
 
     private func prefill() {
         guard let account else { return }
