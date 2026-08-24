@@ -176,6 +176,10 @@ struct GitHubEditView: View {
             effectiveKind = GitHubCredentialKind.kindStrict(for: credentialValue)
             guard effectiveKind != nil else { throw SaveError.message("验证码/TOTP 密钥格式无效") }
         }
+        // L6:凭据为空但用户改过类型(编辑态与已存类型不一致)→ 明确报错,不再静默丢弃用户选择
+        if credentialValue.isEmpty, effectiveKind != nil, effectiveKind != account?.credentialKind {
+            throw SaveError.message("请先填写验证码/TOTP 密钥")
+        }
         let notesValue = notes.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let account {
