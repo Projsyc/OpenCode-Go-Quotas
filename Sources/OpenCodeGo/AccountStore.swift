@@ -250,6 +250,9 @@ final class AccountStore {
     /// 并行刷新全部账号:每个账号一个 TaskGroup 子任务并发抓取(总耗时 ≈ 最慢单个账号,
     /// 而非串行之和),聚合后回到主线程统一按 id 写回,且只落盘一次。
     /// 子任务只返回 (id, usage, error) 元组,不触碰 accounts,天然避免跨线程数据竞争。
+    /// 首轮失败的账号(除 cookie 缺失等本地错误外)自动重试 1 次:按失败序号错开
+    /// 250ms × n 短退避,重试同样并发;重试成功覆盖首轮错误,仍失败以重试 error 为准。
+    /// 整体单轮内每账号最多重试 1 次,不引入跨轮/无限重试。
     func refreshAll() async {
         // 生命周期标记:进入即置位,所有退出路径(demo 提前返回/成功/失败)统一复位。
         // refreshAll 为 @MainActor async,置位与复位都在同一 actor 上下文,不跨线程
@@ -264,6 +267,7 @@ final class AccountStore {
 
         // 主线程先取快照 + 读 Cookie;子任务只持 Sendable 的 client 与值类型快照
         let client = self.client
+        let logger = Self.logger
         let snapshot = accounts.map {
             (id: $0.id, workspaceId: $0.workspaceId, cookie: keychain.get($0.id.uuidString))
         }
@@ -287,6 +291,50 @@ final class AccountStore {
             }
             for await result in group {
                 results.append(result)
+            }
+        }
+
+        // 收集首轮失败且持有 Cookie 的账号 → 第二波重试(每账号最多重试 1 次)。
+        // cookie 缺失类错误重试无意义,直接跳过,保留首轮错误写回
+        var retryItems: [(id: UUID, workspaceId: String, cookie: String, error: String)] = []
+        for result in results {
+            guard let error = result.error,
+                  let item = snapshot.first(where: { $0.id == result.id }),
+                  let cookie = item.cookie
+            else { continue }
+            retryItems.append((id: result.id, workspaceId: item.workspaceId, cookie: cookie, error: error))
+        }
+
+        if !retryItems.isEmpty {
+            var retryResults: [(id: UUID, usage: UsageResult?, error: String?)] = []
+            retryResults.reserveCapacity(retryItems.count)
+            await withTaskGroup(of: (UUID, UsageResult?, String?).self) { group in
+                for (index, item) in retryItems.enumerated() {
+                    group.addTask {
+                        // 短退避:按失败序号错开 250ms × n(n = 1-based 失败序号),
+                        // 让并发重试错峰,避免同一瞬间扎堆;重试期间 isRefreshing 保持 true
+                        try? await Task.sleep(
+                            nanoseconds: UInt64(250_000_000) * UInt64(index + 1))
+                        logger.warning("刷新失败,自动重试账号 \(item.id.uuidString): \(item.error)")
+                        do {
+                            let usage = try await client.fetchGoQuota(
+                                workspaceId: item.workspaceId, authCookie: item.cookie)
+                            return (item.id, usage, nil)
+                        } catch {
+                            logger.error("重试仍失败,账号 \(item.id.uuidString): \(error.localizedDescription)")
+                            return (item.id, nil, error.localizedDescription)
+                        }
+                    }
+                }
+                for await result in group {
+                    retryResults.append(result)
+                }
+            }
+            // 重试结果覆盖首轮:成功 → usage 写回(usageError 清空);仍失败 → 以重试 error 为准
+            for (id, usage, error) in retryResults {
+                if let idx = results.firstIndex(where: { $0.id == id }) {
+                    results[idx] = (id: id, usage: usage, error: error)
+                }
             }
         }
 
