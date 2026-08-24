@@ -60,6 +60,9 @@ struct GitHubLoginView: View {
 
     /// 统一日志(subsystem 固定,用户可用 `log show --predicate 'subsystem == "com.acccan.opencode-go"'` 提取)
     private let logger = Logger(subsystem: "com.acccan.opencode-go", category: "github-login")
+    /// 诊断文件通道:同一时间线同时追加写 ~/Library/Logs/OpenCodeGo/login.log,
+    /// 零门槛取证(os_log 采集依赖 log show 命令,且部分环境采集不到,见 LoginLogSink 注释)
+    private let logSink = LoginLogSink()
     private let service = GitHubLoginService()
     private static let loginTimeout: Duration = .seconds(300)
 
@@ -547,14 +550,18 @@ struct GitHubLoginView: View {
             modifiedSince: .distantPast) { }
     }
 
-    /// 把流程时间线写入统一日志(每流程最多一次)。
+    /// 把流程时间线写入诊断通道(每流程最多一次)。
     /// 时间线条目已按 GitHubLoginService.LoginFlowLog 红线过滤凭据(只含域名/步骤名/
     /// 分类结果),整行标 public 以便 `log show --predicate 'subsystem == "com.acccan.opencode-go"'`
     /// 在真机/本机均可采集;失败/取消/超时/转手动/关闭窗口时调用。
+    /// 双通道:① os_log(用户已有习惯);② 同时追加写 login.log 文件 —— os_log
+    /// 采集依赖手动执行 log show,部分环境(沙箱/中转)看不到新日志,文件通道零门槛
+    /// 取证;两条通道内容同源(同一 timelineText),文件写入失败静默不阻塞流程。
     private func dumpFlowLog() {
         guard !flowLogDumped else { return }
         flowLogDumped = true
         logger.info("login flow: \(self.flowLog.timelineText, privacy: .public)")
+        self.logSink.append(self.flowLog.timelineText)
     }
 }
 
