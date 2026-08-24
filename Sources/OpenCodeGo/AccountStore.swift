@@ -8,7 +8,7 @@ final class AccountStore {
     private(set) var accounts: [Account] = []
     /// 演示模式(启动参数 --demo):注入假数据,不发起真实请求
     private(set) var demoMode = false
-    /// 账号数据文件读取/解码失败时的用户可见错误(仅启动加载时置位)
+    /// 账号数据文件读取/解码失败时的用户可见错误(启动加载时置位,首次成功保存后清空)
     private(set) var loadError: String?
 
     private let keychain: KeychainStoring
@@ -90,7 +90,13 @@ final class AccountStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(accounts) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        do {
+            try data.write(to: fileURL, options: .atomic)
+            // L3:首次成功落盘后清空启动加载错误(损坏红条会话内可消除);写盘失败时保留
+            loadError = nil
+        } catch {
+            // 写盘失败 → 保留 loadError(数据仍不可靠,红条继续提示)
+        }
     }
 
     // MARK: - 账号增删改
