@@ -394,6 +394,42 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertTrue(js.contains("JSON.stringify"))
     }
 
+    /// 修复(线上实证):OpenAuth 登录页真实入口是 href="/github/authorize"(带前导斜杠,
+    /// 避免误匹配 github.com/login/oauth 之类),readCookiesJS 必须覆盖它;
+    /// 且既有守卫(无 auth cookie + 未点击过才点一次)必须保留
+    func testReadCookiesJSIncludesGithubAuthorizeEntry() {
+        let js = GitHubLoginService.readCookiesJS()
+        XCTAssertTrue(js.contains(#"a[href*="/github/authorize"]"#),
+                      "线上 OpenAuth 页入口 href=/github/authorize 必须被选择器覆盖")
+        XCTAssertTrue(js.contains("!auth &&"), "仅无 auth cookie 时才点击")
+        XCTAssertTrue(js.contains("window.__opencodeGoClickedSignIn"), "「仅未点击过时点击一次」守卫必须保留")
+        XCTAssertTrue(js.contains("link.click()"), "命中链接应执行点击")
+    }
+
+    /// 选择器链按优先级排序(首个命中即用,且 querySelector 按文档顺序返回):
+    /// `a[href*="/github/authorize"]`(线上 OpenAuth 入口)→ `a[href*="oauth/authorize"]`
+    /// → `a[href*="github.com/login/oauth"]`(标准 GitHub OAuth 链接)
+    func testReadCookiesJSSelectorChainOrder() {
+        let js = GitHubLoginService.readCookiesJS()
+        let selectors = [
+            #"a[href*="/github/authorize"]"#,
+            #"a[href*="oauth/authorize"]"#,
+            #"a[href*="github.com/login/oauth"]"#,
+        ]
+        var previousEnd: String.Index?
+        for selector in selectors {
+            guard let range = js.range(of: selector) else {
+                XCTFail("readCookiesJS 应包含选择器: \(selector)")
+                continue
+            }
+            if let previousEnd {
+                XCTAssertLessThan(previousEnd, range.lowerBound,
+                                  "选择器应按优先级排序,\(selector) 应位于前一个之后")
+            }
+            previousEnd = range.upperBound
+        }
+    }
+
     // MARK: - 步骤状态栏展示属性(S5:stepText/stepIcon/stepColor 数据收敛到 enum)
 
     func testStepStatusText() {
