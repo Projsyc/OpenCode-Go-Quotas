@@ -55,6 +55,29 @@ private enum TestKeychainError: Error {
     case writeFailed
 }
 
+/// 线程安全请求计数器:按 key(workspaceId)记录每个账号的请求序号(1-based),
+/// 用于区分「首轮」与「重试」请求,并统计总请求数(不同账号的请求并发交错)
+private final class RequestCounter {
+    private let lock = NSLock()
+    private var attempts: [String: Int] = [:]
+
+    /// 记录一次请求并返回该账号的当前请求序号(1-based)
+    func next(_ key: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let n = (attempts[key] ?? 0) + 1
+        attempts[key] = n
+        return n
+    }
+
+    /// 全部账号的累计请求数
+    var total: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return attempts.values.reduce(0, +)
+    }
+}
+
 /// 可控制交付时序的 URLProtocol(仅本文件测试用):
 /// startLoading 立即返回,响应体在后台队列等 gate 后交付——不阻塞 URLSession 的
 /// 协议加载队列,因此同一 session 可有多个请求同时在途(在 handler 里 gate.wait()
@@ -124,7 +147,8 @@ final class AccountStoreConcurrencyTests: XCTestCase {
     }
 
     /// 用 GatedURLProtocol 的 store:可让多个请求同时在途并控制交付顺序
-    private func makeGatedTempStore() -> (store: AccountStore, fileURL: URL, dir: URL) {
+    private func makeGatedTempStore(keychain: KeychainStoring = InMemoryKeychain())
+        -> (store: AccountStore, fileURL: URL, dir: URL) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("AccountStoreConcurrencyTests-\(UUID().uuidString)", isDirectory: true)
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -133,7 +157,7 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         config.protocolClasses = [GatedURLProtocol.self]
         let store = AccountStore(
             client: QuotaClient(session: URLSession(configuration: config)),
-            keychain: InMemoryKeychain(),
+            keychain: keychain,
             fileURL: fileURL)
         return (store, fileURL, dir)
     }
@@ -626,5 +650,119 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
         await t.store.refreshAll()
         XCTAssertFalse(t.store.isRefreshing)
+    }
+
+    // MARK: - P3:refreshAll 失败自动重试(短退避)
+
+    /// 首轮失败 + 重试成功 → 总请求数 2(仅该账号),usage 写回、usageError 清空
+    func testRefreshAllRetrySucceedsWritesUsageAndClearsError() async throws {
+        let t = makeGatedTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        let counter = RequestCounter()
+        GatedURLProtocol.handler = { request in
+            // 首轮瞬时网络失败(超时),重试成功
+            if counter.next(validWorkspace) == 1 { throw URLError(.timedOut) }
+            return okResponse(request.url!, body: quotaHTML)
+        }
+
+        await t.store.refreshAll()
+
+        XCTAssertEqual(counter.total, 2, "首轮 1 次 + 重试 1 次 = 总请求数 2")
+        XCTAssertEqual(t.store.accounts[0].usage?.rolling?.usagePercent ?? -1, 34.567, accuracy: 0.0001)
+        XCTAssertNil(t.store.accounts[0].usageError, "重试成功后 usageError 必须清空")
+        XCTAssertFalse(t.store.isRefreshing, "重试完成后 isRefreshing 复位")
+    }
+
+    /// 首轮失败 + 重试仍失败 → usageError 以重试 error 为准(更具体),总请求数 2
+    func testRefreshAllRetryStillFailsKeepsRetryError() async throws {
+        let t = makeGatedTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        let counter = RequestCounter()
+        GatedURLProtocol.handler = { request in
+            if counter.next(validWorkspace) == 1 { throw URLError(.timedOut) } // 首轮超时
+            return errorResponse(request.url!, statusCode: 500) // 重试仍是服务端错误
+        }
+
+        await t.store.refreshAll()
+
+        XCTAssertEqual(counter.total, 2, "首轮 1 次 + 重试 1 次 = 总请求数 2")
+        XCTAssertNil(t.store.accounts[0].usage)
+        XCTAssertEqual(t.store.accounts[0].usageError, "请求失败 (HTTP 500)",
+                       "两次都失败时应以重试 error 为准(而非首轮超时文案)")
+    }
+
+    /// cookie 缺失(非网络错误)→ 不发起任何请求、不重试,错误文案「未找到 Cookie…」
+    func testRefreshAllWithMissingCookieDoesNotRetry() async throws {
+        let keychain = InMemoryKeychain()
+        let t = makeGatedTempStore(keychain: keychain)
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+        keychain.delete(t.store.accounts[0].id.uuidString) // 模拟 Cookie 缺失
+
+        GatedURLProtocol.handler = { request in
+            XCTFail("Cookie 缺失时不应发起任何请求")
+            throw URLError(.badServerResponse)
+        }
+
+        await t.store.refreshAll()
+
+        XCTAssertEqual(t.store.accounts[0].usageError, "未找到 Cookie，请重新添加账号")
+        XCTAssertNil(t.store.accounts[0].usage)
+    }
+
+    /// 成功账号不受影响:总数 = 各账号轮数之和(A 首轮成功 1 次,B 失败后重试共 2 次)
+    func testRefreshAllRetryDoesNotAffectSuccessfulAccounts() async throws {
+        let t = makeGatedTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: "wrk_aaa111", authCookie: validCookie, notes: "")
+        _ = try t.store.addAccount(name: "B", workspaceId: "wrk_bbb222", authCookie: validCookie, notes: "")
+
+        let counter = RequestCounter()
+        GatedURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path.contains("wrk_bbb222") {
+                if counter.next("wrk_bbb222") == 1 { throw URLError(.timedOut) } // B 首轮失败
+            } else {
+                _ = counter.next("wrk_aaa111")
+            }
+            return okResponse(request.url!, body: quotaHTML)
+        }
+
+        await t.store.refreshAll()
+
+        XCTAssertEqual(counter.total, 3, "A 首轮 1 次 + B 首轮失败 + 重试成功 = 3 次")
+        XCTAssertEqual(t.store.accounts[0].usage?.rolling?.usagePercent ?? -1, 34.567, accuracy: 0.0001)
+        XCTAssertEqual(t.store.accounts[1].usage?.rolling?.usagePercent ?? -1, 34.567, accuracy: 0.0001)
+        XCTAssertNil(t.store.accounts[0].usageError)
+        XCTAssertNil(t.store.accounts[1].usageError, "重试成功后 B 的 usageError 必须清空")
+    }
+
+    /// 重试在途期间 isRefreshing 保持 true(整轮含重试全部完成后才复位)
+    func testRefreshAllIsRefreshingStaysTrueDuringRetry() async throws {
+        let t = makeGatedTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        // 首轮与重试都返回 HTTP 500(经 didReceive 交付,可被 gate 挂起)
+        let bothAttempts = XCTestExpectation(description: "首轮与重试均已发起")
+        bothAttempts.expectedFulfillmentCount = 2
+        let retryGate = DispatchSemaphore(value: 0)
+        GatedURLProtocol.handler = { request in errorResponse(request.url!, statusCode: 500) }
+        GatedURLProtocol.gates = [nil, retryGate] // 首轮立即交付,重试挂起
+        GatedURLProtocol.startedExpectation = bothAttempts
+
+        let task = Task { await t.store.refreshAll() }
+        await fulfillment(of: [bothAttempts], timeout: 5)
+
+        XCTAssertTrue(t.store.isRefreshing, "重试在途期间 isRefreshing 必须保持 true")
+        retryGate.signal()
+        await task.value
+
+        XCTAssertFalse(t.store.isRefreshing, "重试完成后必须复位为 false")
+        XCTAssertEqual(t.store.accounts[0].usageError, "请求失败 (HTTP 500)")
     }
 }
