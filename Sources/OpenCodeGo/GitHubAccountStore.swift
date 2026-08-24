@@ -114,32 +114,26 @@ final class GitHubAccountStore {
     // MARK: - 账号增删改
 
     @discardableResult
-    func add(
-        username: String,
-        notes: String = "",
-        password: String,
-        credential: String? = nil,
-        kind: GitHubCredentialKind? = nil
-    ) throws -> GitHubAccount {
-        let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
+    func add(_ input: GitHubAccountInput) throws -> GitHubAccount {
+        let name = input.username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw GitHubAccountStoreError.emptyUsername }
-        let pwd = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pwd = input.password.trimmingCharacters(in: .whitespacesAndNewlines)
         guard pwd.count >= 6 else { throw GitHubAccountStoreError.passwordTooShort }
-        guard credential == nil || kind != nil else { throw GitHubAccountStoreError.credentialWithoutKind }
+        guard input.credential == nil || input.kind != nil else { throw GitHubAccountStoreError.credentialWithoutKind }
         guard !accounts.contains(where: { $0.username.lowercased() == name.lowercased() }) else {
             throw GitHubAccountStoreError.duplicateUsername(name)
         }
         let account = GitHubAccount(
             username: name,
-            notes: notes,
-            credentialKind: kind,
-            lastCodeAt: kind == .oneTimeCode ? Date() : nil)
+            notes: input.notes,
+            credentialKind: input.kind,
+            lastCodeAt: input.kind == .oneTimeCode ? Date() : nil)
         // Keychain 写入前置:任一 set 失败即回滚已写入项并抛错,内存/磁盘均不变,
         // 不留孤儿 Keychain 条目
         let passwordKey = key("password", account.id)
         do {
             try keychain.set(pwd, forKey: passwordKey)
-            if let credential {
+            if let credential = input.credential {
                 try keychain.set(credential, forKey: key("credential", account.id))
             }
         } catch {
@@ -151,19 +145,20 @@ final class GitHubAccountStore {
         return account
     }
 
-    /// 更新账号;password/credential/kind 传 nil 表示不修改(credential 更新时 kind 留 nil 沿用现有类型)
+    /// 更新账号。input 提供完整字段,应用语义:
+    /// - `passwordChanged == false` → 密码不修改(沿用旧值)
+    /// - `input.credential == nil` → 凭据不修改;非 nil 时写入(此时 `input.kind` 为 nil 则沿用现有类型)
+    /// - `input.kind` 非 nil 且 credential 为 nil → 仅修改类型
     func update(
         _ id: UUID,
-        username: String,
-        notes: String,
-        password: String? = nil,
-        credential: String? = nil,
-        kind: GitHubCredentialKind? = nil
+        input: GitHubAccountInput,
+        passwordChanged: Bool
     ) throws {
         guard let i = accounts.firstIndex(where: { $0.id == id }) else { return }
-        let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = input.username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw GitHubAccountStoreError.emptyUsername }
-        if let pwd = password?.trimmingCharacters(in: .whitespacesAndNewlines), pwd.count < 6 {
+        if passwordChanged,
+           input.password.trimmingCharacters(in: .whitespacesAndNewlines).count < 6 {
             throw GitHubAccountStoreError.passwordTooShort
         }
         if accounts.contains(where: { $0.id != id && $0.username.lowercased() == name.lowercased() }) {
@@ -173,10 +168,12 @@ final class GitHubAccountStore {
         // credential 写失败时回滚已写入的 password(用旧值还原或删除)
         let oldPassword = keychain.get(key("password", id))
         do {
-            if let pwd = password?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                try keychain.set(pwd, forKey: key("password", id))
+            if passwordChanged {
+                try keychain.set(
+                    input.password.trimmingCharacters(in: .whitespacesAndNewlines),
+                    forKey: key("password", id))
             }
-            if let cred = credential {
+            if let cred = input.credential {
                 try keychain.set(cred, forKey: key("credential", id))
             }
         } catch {
@@ -189,12 +186,12 @@ final class GitHubAccountStore {
         }
         // Keychain 全部写入成功后才改内存
         accounts[i].username = name
-        accounts[i].notes = notes
+        accounts[i].notes = input.notes
         accounts[i].updatedAt = Date()
-        if credential != nil {
-            if let kind { accounts[i].credentialKind = kind }
+        if input.credential != nil {
+            if let kind = input.kind { accounts[i].credentialKind = kind }
             if accounts[i].credentialKind == .oneTimeCode { accounts[i].lastCodeAt = Date() }
-        } else if let kind {
+        } else if let kind = input.kind {
             accounts[i].credentialKind = kind
         }
         save()

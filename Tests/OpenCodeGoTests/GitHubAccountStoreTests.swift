@@ -43,9 +43,10 @@ final class GitHubAccountStoreTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
 
         let account = try t.store.add(
-            username: "octocat", notes: "主账号",
-            password: "P@ssw0rd-secret-1",
-            credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret)
+            GitHubAccountInput(
+                username: "octocat", notes: "主账号",
+                password: "P@ssw0rd-secret-1",
+                credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
 
         XCTAssertEqual(t.store.accounts.count, 1)
         XCTAssertEqual(t.store.accounts[0].username, "octocat")
@@ -62,7 +63,7 @@ final class GitHubAccountStoreTests: XCTestCase {
     func testAddOneTimeCodeRecordsLastCodeAt() throws {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
-        let account = try t.store.add(username: "alice", password: "pass123456", credential: "123456", kind: .oneTimeCode)
+        let account = try t.store.add(GitHubAccountInput(username: "alice", password: "pass123456", credential: "123456", kind: .oneTimeCode))
         XCTAssertNotNil(t.store.accounts[0].lastCodeAt)
         XCTAssertEqual(t.store.credential(for: account), "123456")
     }
@@ -70,17 +71,17 @@ final class GitHubAccountStoreTests: XCTestCase {
     func testAddValidation() throws {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
-        XCTAssertThrowsError(try t.store.add(username: "  ", password: "pass123456")) { error in
+        XCTAssertThrowsError(try t.store.add(GitHubAccountInput(username: "  ", password: "pass123456"))) { error in
             XCTAssertEqual(error as? GitHubAccountStoreError, .emptyUsername)
         }
-        XCTAssertThrowsError(try t.store.add(username: "bob", password: "12345")) { error in
+        XCTAssertThrowsError(try t.store.add(GitHubAccountInput(username: "bob", password: "12345"))) { error in
             XCTAssertEqual(error as? GitHubAccountStoreError, .passwordTooShort)
         }
-        XCTAssertThrowsError(try t.store.add(username: "carol", password: "pass123456", credential: "123456", kind: nil)) { error in
+        XCTAssertThrowsError(try t.store.add(GitHubAccountInput(username: "carol", password: "pass123456", credential: "123456", kind: nil))) { error in
             XCTAssertEqual(error as? GitHubAccountStoreError, .credentialWithoutKind)
         }
-        _ = try t.store.add(username: "Alice", password: "pass123456")
-        XCTAssertThrowsError(try t.store.add(username: "alice", password: "other-pass-1")) { error in
+        _ = try t.store.add(GitHubAccountInput(username: "Alice", password: "pass123456"))
+        XCTAssertThrowsError(try t.store.add(GitHubAccountInput(username: "alice", password: "other-pass-1"))) { error in
             XCTAssertEqual(error as? GitHubAccountStoreError, .duplicateUsername("alice"))
         }
     }
@@ -91,8 +92,9 @@ final class GitHubAccountStoreTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
         t.keychain.failPredicate = { $0.hasSuffix("-credential") }   // 模拟 credential 写入失败
         XCTAssertThrowsError(try t.store.add(
-            username: "octocat", password: "P@ssw0rd-1",
-            credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
+            GitHubAccountInput(
+                username: "octocat", password: "P@ssw0rd-1",
+                credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret)))
         XCTAssertTrue(t.store.accounts.isEmpty)
         // 不得留下孤儿 <uuid>-password Keychain 条目
         XCTAssertTrue(t.keychain.storage.allSatisfy { !$0.key.hasSuffix("-password") },
@@ -103,11 +105,14 @@ final class GitHubAccountStoreTests: XCTestCase {
     func testUpdateKeychainFailureLeavesMemoryUntouched() throws {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
-        let account = try t.store.add(username: "octocat", password: "P@ssw0rd-1")
+        let account = try t.store.add(GitHubAccountInput(username: "octocat", password: "P@ssw0rd-1"))
         t.keychain.failPredicate = { $0.hasSuffix("-credential") }
         XCTAssertThrowsError(try t.store.update(
-            account.id, username: "renamed", notes: "新备注",
-            password: "NewP@ss-123", credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
+            account.id,
+            input: GitHubAccountInput(
+                username: "renamed", notes: "新备注",
+                password: "NewP@ss-123", credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret),
+            passwordChanged: true))
         // 内存不变:用户名/备注/类型均未应用
         XCTAssertEqual(t.store.accounts[0].username, "octocat")
         XCTAssertEqual(t.store.accounts[0].notes, "")
@@ -121,20 +126,32 @@ final class GitHubAccountStoreTests: XCTestCase {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
         let account = try t.store.add(
-            username: "octocat", password: "P@ssw0rd-1",
-            credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret)
+            GitHubAccountInput(
+                username: "octocat", password: "P@ssw0rd-1",
+                credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
 
         // 改用户名/备注
-        try t.store.update(account.id, username: "octocat2", notes: "新备注")
+        try t.store.update(
+            account.id,
+            input: GitHubAccountInput(username: "octocat2", notes: "新备注", password: ""),
+            passwordChanged: false)
         XCTAssertEqual(t.store.accounts[0].username, "octocat2")
         XCTAssertEqual(t.store.accounts[0].notes, "新备注")
         // 改密码,凭据留 nil 不修改
-        try t.store.update(account.id, username: "octocat2", notes: "新备注", password: "P@ssw0rd-2")
+        try t.store.update(
+            account.id,
+            input: GitHubAccountInput(username: "octocat2", notes: "新备注", password: "P@ssw0rd-2"),
+            passwordChanged: true)
         XCTAssertEqual(t.store.password(for: account), "P@ssw0rd-2")
         XCTAssertEqual(t.store.credential(for: account), "GEZDGNBVGY3TQOJQ")
         XCTAssertEqual(t.store.accounts[0].credentialKind, .totpSecret)
         // 换一次性验证码 + 类型
-        try t.store.update(account.id, username: "octocat2", notes: "新备注", credential: "654321", kind: .oneTimeCode)
+        try t.store.update(
+            account.id,
+            input: GitHubAccountInput(
+                username: "octocat2", notes: "新备注",
+                password: "", credential: "654321", kind: .oneTimeCode),
+            passwordChanged: false)
         XCTAssertEqual(t.store.credential(for: account), "654321")
         XCTAssertEqual(t.store.accounts[0].credentialKind, .oneTimeCode)
         XCTAssertNotNil(t.store.accounts[0].lastCodeAt)
@@ -144,8 +161,9 @@ final class GitHubAccountStoreTests: XCTestCase {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
         let account = try t.store.add(
-            username: "octocat", password: "P@ssw0rd-1",
-            credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret)
+            GitHubAccountInput(
+                username: "octocat", password: "P@ssw0rd-1",
+                credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
         t.store.delete(account.id)
         XCTAssertTrue(t.store.accounts.isEmpty)
         XCTAssertNil(t.keychain.storage["\(account.id.uuidString)-password"])
@@ -158,8 +176,9 @@ final class GitHubAccountStoreTests: XCTestCase {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
         try t.store.add(
-            username: "octocat", password: "P@ssw0rd-1",
-            credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret)
+            GitHubAccountInput(
+                username: "octocat", password: "P@ssw0rd-1",
+                credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
 
         // 第二个 store 共享同一文件 + 同一 keychain → 能加载回元数据与凭据
         let store2 = GitHubAccountStore(keychain: t.keychain, fileURL: t.fileURL)
@@ -180,8 +199,8 @@ final class GitHubAccountStoreTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
         let password = "P@ssw0rd-verysecret-123"
         let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-        _ = try t.store.add(username: "octocat", password: password, credential: secret, kind: .totpSecret)
-        _ = try t.store.add(username: "carol", password: "another-secret-456", credential: "654321", kind: .oneTimeCode)
+        _ = try t.store.add(GitHubAccountInput(username: "octocat", password: password, credential: secret, kind: .totpSecret))
+        _ = try t.store.add(GitHubAccountInput(username: "carol", password: "another-secret-456", credential: "654321", kind: .oneTimeCode))
 
         let json = String(decoding: try Data(contentsOf: t.fileURL), as: UTF8.self)
         XCTAssertFalse(json.contains(password))
@@ -201,7 +220,7 @@ final class GitHubAccountStoreTests: XCTestCase {
     func testImportBatchPartialSuccess() throws {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
-        _ = try t.store.add(username: "alice", password: "alice-pass-123")
+        _ = try t.store.add(GitHubAccountInput(username: "alice", password: "alice-pass-123"))
 
         let rows = [
             GitHubImportRow(lineNumber: 1, username: "alice", password: "whatever-12345", credential: nil, kind: nil),

@@ -182,21 +182,21 @@ struct GitHubEditView: View {
         }
         let notesValue = notes.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // 凭据参数组打包成 input 一次构造,add/update 共用,调用点不再零散传参
+        let input = GitHubAccountInput(
+            username: name,
+            notes: notesValue,
+            password: passwordValue,
+            credential: credentialValue.isEmpty ? nil : credentialValue,
+            kind: credentialValue.isEmpty ? nil : effectiveKind)
+
         if let account {
             try store.update(
                 account.id,
-                username: name,
-                notes: notesValue,
-                password: passwordValue.isEmpty ? nil : passwordValue,
-                credential: credentialValue.isEmpty ? nil : credentialValue,
-                kind: credentialValue.isEmpty ? nil : effectiveKind)
+                input: input,
+                passwordChanged: !passwordValue.isEmpty)   // 编辑时密码留空 = 不修改
         } else {
-            try store.add(
-                username: name,
-                notes: notesValue,
-                password: passwordValue,
-                credential: credentialValue.isEmpty ? nil : credentialValue,
-                kind: credentialValue.isEmpty ? nil : effectiveKind)
+            try store.add(input)
         }
     }
 }
