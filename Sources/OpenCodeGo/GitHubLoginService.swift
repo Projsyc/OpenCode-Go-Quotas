@@ -268,6 +268,16 @@ struct GitHubLoginService {
         state == .fillingCredentials || state == .twoFactor
     }
 
+    /// 当前步骤是否仍处于「启动加载」阶段(idle / loadingLoginPage):
+    /// 首个关键步骤(进入 github 登录页/授权页等)到达后即为 false——
+    /// 这是启动加载阶段守护超时(15s)的达成判定:启动期间步骤不变
+    /// (页面静默卡住 / 轮询持续空转)时该函数保持 true,由阶段超时判失败;
+    /// 离开即视为阶段达成,取消阶段计时(后续阶段仍由全局 300s 超时兜底)。
+    /// 终态(.done / .failed)一律 false:终止路径自行清理计时器,不参与阶段判定。
+    static func isStartupLoadingStep(_ state: GitHubLoginStep) -> Bool {
+        state == .idle || state == .loadingLoginPage
+    }
+
     // MARK: - 超时重启判定(「步骤变化才重启 300s 无进展超时」)
 
     /// 步骤变化 → 重启 300s 无进展超时;同步骤(无进展)不重启;终态(.done / .failed)

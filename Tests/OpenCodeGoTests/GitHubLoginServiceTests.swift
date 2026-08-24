@@ -729,6 +729,52 @@ final class GitHubLoginServiceTests: XCTestCase {
             oldStep: .twoFactor, newStep: .failed("登录超时")))
     }
 
+    // MARK: - isStartupLoadingStep(启动加载阶段判定,阶段守护超时依据)
+
+    /// 启动加载阶段 = idle / loadingLoginPage:从 start() 到首个关键步骤
+    /// (进入 github 登录页/授权页等)之间的阶段;阶段守护超时(15s)只在
+    /// 仍处该阶段时有效,离开即视为达成,应取消阶段计时
+    func testIsStartupLoadingStepCoversStartupOnly() {
+        XCTAssertTrue(GitHubLoginService.isStartupLoadingStep(.idle))
+        XCTAssertTrue(GitHubLoginService.isStartupLoadingStep(.loadingLoginPage))
+        for step in [GitHubLoginStep.githubLoginForm, .fillingCredentials, .twoFactor,
+                     .waitingOAuthRedirect, .needsManualIntervention("请手动完成")] {
+            XCTAssertFalse(GitHubLoginService.isStartupLoadingStep(step),
+                           "\(step.flowName) 已到达登录/后续阶段,启动阶段达成")
+        }
+        XCTAssertFalse(GitHubLoginService.isStartupLoadingStep(.done(authCookie: "x")), "终态不参与阶段判定")
+        XCTAssertFalse(GitHubLoginService.isStartupLoadingStep(.failed("x")))
+    }
+
+    /// 决策与阶段判定联动:启动页(opencode 域 / 无 URL)决策仍留在启动阶段
+    /// (继续计时,覆盖「轮询空转」场景);到达 github 登录页/授权页即离开,
+    /// 阶段达成 → 视图据此取消 15s 计时
+    func testDecideLeavesStartupStageAtGithubLoginPage() {
+        // 启动页仍在启动加载阶段(页面静默 + 轮询空转都算未达成)
+        let opening = GitHubLoginService.decide(
+            for: url("https://opencode.ai/workspace/wrk_abc123"), githubUsername: "u",
+            githubPassword: "p", totpCode: nil, state: .idle)
+        XCTAssertEqual(opening.step, .loadingLoginPage)
+        XCTAssertTrue(GitHubLoginService.isStartupLoadingStep(opening.step),
+                      "opencode 启动页未跳转 GitHub 前仍处于启动阶段")
+
+        // 到达 github 登录页 → 启动阶段达成
+        let atLogin = GitHubLoginService.decide(
+            for: url("https://github.com/login?return_to=https%3A%2F%2Fgithub.com%2Flogin%2Foauth%2Fauthorize"),
+            githubUsername: "u", githubPassword: "p",
+            totpCode: nil, state: .loadingLoginPage)
+        XCTAssertEqual(atLogin.step, .githubLoginForm)
+        XCTAssertFalse(GitHubLoginService.isStartupLoadingStep(atLogin.step),
+                       "github 登录页 = 首个关键步骤到达,启动阶段达成")
+
+        // OAuth 授权页同为关键步骤(github 页决策一律离开启动阶段)
+        let atAuthorize = GitHubLoginService.decide(
+            for: url("https://github.com/login/oauth/authorize?client_id=opencode"),
+            githubUsername: "u", githubPassword: "p",
+            totpCode: nil, state: .loadingLoginPage)
+        XCTAssertFalse(GitHubLoginService.isStartupLoadingStep(atAuthorize.step))
+    }
+
     // MARK: - decide:终态不被导航决定推翻(审计:终态残留)
 
     /// 终态(.done / .failed)只由视图的成功 / 超时路径置入;decide 对任何 URL
