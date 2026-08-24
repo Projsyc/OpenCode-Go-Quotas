@@ -1,0 +1,73 @@
+import Foundation
+import XCTest
+@testable import OpenCodeGo
+
+/// GitHubLoginView 一次性注入重试纯逻辑测试(b23 审计 #8):
+/// 退避序列(300ms × n 级进)与「未命中 → 重试」判定(no-authorize-btn / no-otp /
+/// no-form / JS 错误 / readCookies 未命中);不测 WKWebView 交互(无真实网络)。
+final class GitHubLoginViewTests: XCTestCase {
+
+    // MARK: - 退避序列(注入前等待毫秒)
+
+    func testInjectOneShotDelaysMsProgression() {
+        XCTAssertEqual(
+            GitHubLoginView.injectOneShotDelaysMs(maxAttempts: 3),
+            [300, 600, 900],
+            "共 3 次尝试,300ms × n 级进小退避(300/600/900)")
+    }
+
+    func testInjectOneShotDelaysMsSingleAttemptMatchesLegacy() {
+        XCTAssertEqual(GitHubLoginView.injectOneShotDelaysMs(maxAttempts: 1), [300],
+                       "仅 1 次尝试 = 原有 300ms 单次注入行为,向后兼容")
+    }
+
+    func testInjectOneShotDelaysMsNonPositiveIsEmpty() {
+        XCTAssertEqual(GitHubLoginView.injectOneShotDelaysMs(maxAttempts: 0), [])
+        XCTAssertEqual(GitHubLoginView.injectOneShotDelaysMs(maxAttempts: -1), [])
+    }
+
+    func testInjectOneShotMaxAttemptsContract() {
+        XCTAssertEqual(GitHubLoginView.injectOneShotMaxAttempts, 3, "首次 + 最多 2 次重试(共 3 次)")
+        XCTAssertEqual(
+            GitHubLoginView.injectOneShotDelaysMs(
+                maxAttempts: GitHubLoginView.injectOneShotMaxAttempts).count,
+            GitHubLoginView.injectOneShotMaxAttempts,
+            "退避序列长度应与总尝试次数一致")
+    }
+
+    // MARK: - 未命中判定(目标未就绪 → 重试)
+
+    func testInjectOneShotShouldRetryMissProtocols() {
+        for result in ["no-authorize-btn", "no-otp", "no-form"] {
+            XCTAssertTrue(GitHubLoginView.injectOneShotShouldRetry(result),
+                          "\(result) 应视为目标元素未就绪,触发受控重试")
+        }
+    }
+
+    func testInjectOneShotShouldRetryJSErrorIsConservative() {
+        XCTAssertTrue(GitHubLoginView.injectOneShotShouldRetry(nil),
+                      "JS 执行出错 / 无返回值 → 保守重试")
+    }
+
+    func testInjectOneShotShouldRetryHitsDoNotRetry() {
+        for result in ["authorized", "submitted", "otp-filled", "filled", "already-filled"] {
+            XCTAssertFalse(GitHubLoginView.injectOneShotShouldRetry(result),
+                           "\(result) 应视为命中,不再重试")
+        }
+    }
+
+    // MARK: - readCookiesJS 结果(JSON 串)
+
+    func testInjectOneShotShouldRetryReadCookiesJSON() {
+        // 未取到 auth 且未点击登录入口(SPA 未渲染完)→ 重试
+        XCTAssertTrue(GitHubLoginView.injectOneShotShouldRetry(#"{"auth":null,"clicked":false}"#))
+        // 缺少 clicked 键:无任何进展 → 保守重试
+        XCTAssertTrue(GitHubLoginView.injectOneShotShouldRetry(#"{"auth":null}"#))
+        // 已点击入口(等待跳转)→ 不重试
+        XCTAssertFalse(GitHubLoginView.injectOneShotShouldRetry(#"{"auth":null,"clicked":true}"#))
+        // 已取到 auth=Fe26... cookie → 不重试
+        XCTAssertFalse(GitHubLoginView.injectOneShotShouldRetry(#"{"auth":"Fe26.1.abc"}"#))
+        // 异常返回(非 JSON)→ 保守重试
+        XCTAssertTrue(GitHubLoginView.injectOneShotShouldRetry("{malformed"))
+    }
+}

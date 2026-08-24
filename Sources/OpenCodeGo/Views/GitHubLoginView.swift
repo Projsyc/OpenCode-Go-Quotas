@@ -45,8 +45,13 @@ struct GitHubLoginView: View {
     @State private var succeeded = false
     @State private var pollTimer: Timer?
     @State private var timeoutTask: Task<Void, Never>?
-    /// 在途注入(凭据重试 / 内联 OTP 探测):新决策或页面消失时取消,防止旧页面上下文误注入
+    /// 在途注入(凭据重试 / 内联 OTP 探测 / 一次性注入重试):新决策或页面消失时取消,
+    /// 防止旧页面上下文误注入
     @State private var injectionTask: Task<Void, Never>?
+    /// 一次性注入会话代次:每次启动一次性注入(或取消在途注入)自增;
+    /// 结果回调凭它识别过期结果——期间已启动新注入 / 页面已替换 / 流程已取消的旧结果
+    /// 不得再触发重试,保证与注入任务单任务无叠(见 handleOneShotInjectResult)
+    @State private var injectSession = 0
     /// 凭据注入重试中(表单未渲染):状态保持 .githubLoginForm,状态栏显示「等待表单渲染…」
     @State private var isWaitingFormRender = false
     /// 流程诊断时间线(不含凭据),失败/取消/超时时写入统一日志
@@ -324,27 +329,97 @@ struct GitHubLoginView: View {
             injectOTPProbe(js: js, url: url)
             return
         }
-        // 其余注入(授权点击 / two-factor 页 OTP / 读 cookie):一次性注入,结果不解释
+        // 其余注入(授权点击 / two-factor 页 OTP / 读 cookie):命中后的动作由原路径承担
+        // (点击 / 填码 / 读 cookie 本身即完成,不推进状态机);这里只解释结果——未命中
+        // (no-authorize-btn / no-otp / no-form / JS 错误)→ 受控重试,见 injectOneShot
         injectOneShot(js: js)
     }
 
     // MARK: - 注入执行
 
-    /// 一次性注入:didFinish 后延时 300ms(防表单尚未渲染),结果不解释。
-    /// 与凭据 / OTP 注入共用 injectionTask:新决策到达时被取消,避免 300ms 窗口内
-    /// 页面已离场还在旧上下文执行;执行前再校验流程未终止、WebView 未被替换。
+    /// 一次性注入(授权点击 / 2FA 填码 / 读 cookie):didFinish 后延时注入;JS 返回
+    /// 「目标不存在」协议(no-authorize-btn / no-otp / no-form)或执行出错 → 受控重试,
+    /// 最多再试 2 次(共 3 次),退避 300ms × n 级进(见 injectOneShotDelaysMs);
+    /// 3 次仍未命中 → 静默放弃(维持原决定,不新增状态,与单次注入时代语义一致)。
+    /// 与凭据 / OTP 注入共用 injectionTask:新决策到达时被取消,避免退避窗口内页面已
+    /// 离场还在旧上下文执行;每次执行前校验流程未终止、WebView 未被替换;
+    /// 结果回调用 injectSession 代次判别过期(新决策 / 页面替换后旧注入结果不再触发重试)。
     @MainActor
-    private func injectOneShot(js: String) {
+    private func injectOneShot(js: String, attempt: Int = 0) {
         guard !succeeded, let wv = webView else { return }
+        let delays = Self.injectOneShotDelaysMs(maxAttempts: Self.injectOneShotMaxAttempts)
+        guard !delays.isEmpty else { return }
+        injectSession &+= 1
+        let session = injectSession
         injectionTask?.cancel()
+        let delayMs = delays[min(attempt, delays.count - 1)]
         injectionTask = Task { @MainActor [self] in
-            try? await Task.sleep(for: .milliseconds(300))
+            try? await Task.sleep(for: .milliseconds(delayMs))
             guard !Task.isCancelled, !self.succeeded, self.webView === wv else { return }
-            wv.evaluateJavaScript(js) { _, error in
+            wv.evaluateJavaScript(js) { value, error in
                 if let error {
                     NSLog("GitHubLogin: JS 注入失败: %@", error.localizedDescription)
                 }
+                Task { @MainActor in
+                    self.handleOneShotInjectResult(
+                        value as? String, js: js, attempt: attempt, session: session)
+                }
             }
+        }
+    }
+
+    /// 一次性注入结果解释(仅为重试决策;命中后的动作由原路径承担,不推进状态机):
+    /// 未命中 / JS 出错 → 级进退避重试;命中 → 不重试;耗尽 → 静默放弃。
+    /// 过期守卫:结果到达时若流程已终止或已启动新注入(会话代次不匹配)→ 丢弃,
+    /// 避免旧页面结果触发重试、取消新决策的注入任务(确认 injectionTask 单任务无叠)。
+    @MainActor
+    private func handleOneShotInjectResult(_ rawResult: String?, js: String, attempt: Int, session: Int) {
+        guard !succeeded, session == injectSession else { return }
+        guard attempt + 1 < Self.injectOneShotMaxAttempts,
+              Self.injectOneShotShouldRetry(rawResult) else { return }
+        flowLog.log("inject: \(rawResult ?? "js-error") -> retry(\(attempt + 1)/\(Self.injectOneShotMaxAttempts))")
+        injectOneShot(js: js, attempt: attempt + 1)
+    }
+
+    // MARK: - 一次性注入重试参数与判定(b23 审计 #8:授权点击 / 2FA 填码 / 读 cookie 受控重试)
+
+    /// 一次性注入总尝试次数(首次 + 最多 2 次重试)
+    static let injectOneShotMaxAttempts = 3
+    /// 一次性注入首批等待(毫秒,防表单尚未渲染,与原有单次注入一致)
+    static let injectOneShotInitialDelayMs: UInt64 = 300
+    /// 一次性注入重试级进步长(毫秒):第 n 次尝试前等待 = 首批 + 步长 × n(300ms × n)
+    static let injectOneShotRetryStepMs: UInt64 = 300
+
+    /// 一次性注入各次尝试前的等待序列(毫秒):maxAttempts 次尝试,每次递增 300ms
+    /// (300 / 600 / 900);maxAttempts <= 0 → 空序列。纯函数,可单测。
+    static func injectOneShotDelaysMs(maxAttempts: Int) -> [UInt64] {
+        guard maxAttempts > 0 else { return [] }
+        return (0..<maxAttempts).map {
+            injectOneShotInitialDelayMs + injectOneShotRetryStepMs * UInt64($0)
+        }
+    }
+
+    /// 一次性注入结果是否触发重试(目标未就绪 → 重试;命中 → 不重试):
+    /// - JS 显式返回「目标不存在」协议(no-authorize-btn / no-otp / no-form)→ 重试;
+    /// - 执行出错(nil / 非 String / 异常返回)→ 保守重试(页面渲染慢,JS 中途失效);
+    /// - readCookiesJS 的 JSON 串:{auth} 有值或已点击登录入口 → 不重试;
+    ///   {auth: null, clicked: false}(登录入口未就绪,SPA 渲染慢)→ 重试;
+    /// - 其余命中返回(authorized / submitted / otp-filled 等)→ 不重试。
+    static func injectOneShotShouldRetry(_ rawResult: String?) -> Bool {
+        switch rawResult {
+        case .none:
+            return true
+        case let s? where s.hasPrefix("{"):
+            guard let data = s.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return true }
+            let hasAuth = (obj["auth"] as? String)?.isEmpty == false
+            let clicked = obj["clicked"] as? Bool ?? false
+            return !hasAuth && !clicked
+        case "no-authorize-btn", "no-otp", "no-form":
+            return true
+        default:
+            return false
         }
     }
 
@@ -451,6 +526,7 @@ struct GitHubLoginView: View {
 
     /// 取消在途注入(新决策 / onDisappear)
     private func cancelPendingInjection() {
+        injectSession &+= 1
         injectionTask?.cancel()
         injectionTask = nil
         isWaitingFormRender = false
