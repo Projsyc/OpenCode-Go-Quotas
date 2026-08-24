@@ -22,7 +22,14 @@ struct ContentView: View {
     @State private var showingAdd = false
     @State private var showingImport = false
     @State private var showingAddGitHub = false
-    @State private var refreshing = false
+    /// 「知道了」仅本次会话隐藏 loadError 横幅(不改 Store.loadError —— 数据仍有风险时
+    /// 错误来源必须保留,只是视图不再展示;Store 首次成功保存后会自动清空)
+    @State private var loadErrorDismissed = false
+
+    /// 任一 Store 有启动加载错误时显示横幅(账号优先, GitHub 第二行)
+    private var hasLoadError: Bool {
+        store.loadError != nil || githubStore.loadError != nil
+    }
 
     private var todayCost: Double? {
         var total: Double? = nil
@@ -42,8 +49,8 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     hero
-                    if let loadError = store.loadError {
-                        loadErrorBanner(loadError)
+                    if !loadErrorDismissed && hasLoadError {
+                        loadErrorBanner
                     }
                     tabPicker
                     if tab == .opencode {
@@ -107,17 +114,22 @@ struct ContentView: View {
             // 操作
             HStack(spacing: 10) {
                 Button {
-                    Task {
-                        refreshing = true
-                        await store.refreshAll()
-                        refreshing = false
-                    }
+                    Task { await store.refreshAll() }
                 } label: {
-                    Label(refreshing ? "刷新中…" : "全部刷新", systemImage: "arrow.clockwise")
+                    if store.isRefreshing {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                            Text("刷新中…")
+                        }
+                    } else {
+                        Label("全部刷新", systemImage: "arrow.clockwise")
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
-                .disabled(refreshing || store.accounts.isEmpty)
+                .disabled(store.isRefreshing || store.accounts.isEmpty)
 
                 Button {
                     showingAdd = true
@@ -131,16 +143,56 @@ struct ContentView: View {
         .padding(.top, 30) // hiddenTitleBar 下给交通灯留空间
     }
 
-    /// accounts.json 损坏等加载失败的红色警告条(样式对齐账号卡错误条)
-    private func loadErrorBanner(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
+    /// 任一 Store 加载失败(accounts.json / github-accounts.json 损坏等)的红色警告横幅:
+    /// 红→橙渐变底(风格与 Theme.accent 渐变一致),账号错误优先第一行,GitHub 账号错误
+    /// 第二行;「知道了」仅本次会话隐藏(不改 Store.loadError)。demo 模式无 loadError,自动不出现。
+    private var loadErrorBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title3)
+                .foregroundStyle(warningGradient)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 6) {
+                if let message = store.loadError {
+                    loadErrorLine(message)
+                }
+                if let message = githubStore.loadError {
+                    loadErrorLine(message)
+                }
+            }
+            Spacer(minLength: 8)
+            Button {
+                loadErrorDismissed = true
+            } label: {
+                Text("知道了")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(warningGradient)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(warningGradient.opacity(0.12)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color(hex: 0xEF4444).opacity(0.25)))
+    }
+
+    private func loadErrorLine(_ message: String) -> some View {
+        Text(message)
             .font(.caption)
             .foregroundStyle(.red)
             .lineLimit(2)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 10).fill(.red.opacity(0.10)))
+    }
+
+    /// 警告色红→橙渐变(横幅图标/按钮/背景;色值与 Theme.levelColor 的红/橙一致)
+    private var warningGradient: LinearGradient {
+        LinearGradient(
+            colors: [Color(hex: 0xEF4444), Color(hex: 0xF59E0B)],
+            startPoint: .leading, endPoint: .trailing)
     }
 
     private func statChip(value: String, label: String) -> some View {
