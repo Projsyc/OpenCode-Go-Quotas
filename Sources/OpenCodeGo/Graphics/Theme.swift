@@ -14,9 +14,33 @@ enum Theme {
         colors: [Color(hex: 0x5B8DEF), Color(hex: 0x8B5CF6), Color(hex: 0xEC6EAD)],
         startPoint: .topLeading, endPoint: .bottomTrailing)
 
-    /// 光斑配色:亮色模式低透明度,暗色模式稍高
+    /// 光斑配色:亮色模式低透明度,暗色模式稍高(暗色下过曝,已从 0.16 微调至 0.12)
     static func blobColor(_ scheme: ColorScheme, hex: UInt32) -> Color {
-        Color(hex: hex).opacity(scheme == .dark ? 0.16 : 0.10)
+        Color(hex: hex).opacity(scheme == .dark ? 0.12 : 0.10)
+    }
+
+    /// 使用率语义色:≤60% 绿、≤85% 橙、>85% 红;暗色模式用更亮的色值保证可读性。
+    /// 仅应在有真实额度数据时使用;无数据时各窗口保持自身主题色。
+    static func levelColor(_ percent: Double, scheme: ColorScheme) -> Color {
+        switch percent {
+        case ...60:
+            return scheme == .dark ? Color(hex: 0x4ADE80) : Color(hex: 0x34D399)
+        case ...85:
+            return scheme == .dark ? Color(hex: 0xFBBF24) : Color(hex: 0xF59E0B)
+        default:
+            return scheme == .dark ? Color(hex: 0xF87171) : Color(hex: 0xEF4444)
+        }
+    }
+
+    /// 模型胶囊配色:同一模型同色,循环取主渐变三色;空 / unknown 模型返回灰色
+    static func modelColor(_ model: String) -> Color {
+        let m = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if m.isEmpty || m.caseInsensitiveCompare("unknown") == .orderedSame {
+            return Color.secondary
+        }
+        let seed = m.unicodeScalars.reduce(0) { $0 &+ Int($1.value) }
+        let palette = [Color(hex: 0x5B8DEF), Color(hex: 0x8B5CF6), Color(hex: 0xEC6EAD)]
+        return palette[seed % palette.count]
     }
 }
 
@@ -97,6 +121,8 @@ struct GaugeRing: View {
     var percent: Double
     var resetText: String
     var color: Color
+    /// 数字文字颜色;nil 时用默认主色(无数据场景)
+    var textColor: Color? = nil
     var size: CGFloat = 74
 
     private var clamped: Double { max(0, min(percent / 100, 1)) }
@@ -115,10 +141,14 @@ struct GaugeRing: View {
                         style: StrokeStyle(lineWidth: 7, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .shadow(color: color.opacity(0.45), radius: 3, y: 1)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.8), value: clamped)
                 VStack(spacing: 0) {
                     Text("\(Int(percent.rounded()))%")
                         .font(.system(size: size * 0.21, weight: .semibold, design: .rounded))
                         .monospacedDigit()
+                        .foregroundStyle(textColor ?? Color.primary)
+                        .contentTransition(.numericText())
+                        .animation(.spring(response: 0.5, dampingFraction: 0.8), value: percent)
                 }
             }
             .frame(width: size, height: size)
