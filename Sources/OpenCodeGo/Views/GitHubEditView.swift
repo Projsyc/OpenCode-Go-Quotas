@@ -176,9 +176,14 @@ struct GitHubEditView: View {
             effectiveKind = GitHubCredentialKind.kind(for: credentialValue)
             guard effectiveKind != nil else { throw SaveError.message("验证码/TOTP 密钥格式无效") }
         }
-        // L6:凭据为空但用户改过类型(编辑态与已存类型不一致)→ 明确报错,不再静默丢弃用户选择
-        if credentialValue.isEmpty, effectiveKind != nil, effectiveKind != account?.credentialKind {
-            throw SaveError.message("请先填写验证码/TOTP 密钥")
+        // L6:编辑态凭据为空但类型与已存类型不一致 → 明确报错,不再静默丢弃用户选择。
+        // 添加态凭据为空(曾输入凭据又清空,类型残留,选择器已隐藏无法改回)→
+        // 一律按「无凭据」保存,否则纯密码账号永远报「请先填写验证码/TOTP 密钥」无法保存
+        if credentialValue.isEmpty {
+            if isEditing, effectiveKind != nil, effectiveKind != account?.credentialKind {
+                throw SaveError.message("请先填写验证码/TOTP 密钥")
+            }
+            effectiveKind = nil
         }
         let notesValue = notes.trimmingCharacters(in: .whitespacesAndNewlines)
 
