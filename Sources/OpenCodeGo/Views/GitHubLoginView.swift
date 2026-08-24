@@ -17,8 +17,9 @@ struct GitHubLoginView: View {
 
     let account: GitHubAccount
     let workspaceId: String
-    /// 捕获到 opencode auth cookie 后回调(值已取出,之后会清空会话,务必先保存)
-    let onAuthCookie: (String) -> Void
+    /// 捕获到 opencode auth cookie 后回调(cookie, 识别到的 workspaceId?;
+    /// 值已取出,之后会清空会话,务必先保存)
+    let onAuthCookie: (String, String?) -> Void
     /// 用户主动取消时回调(可选)
     var onCancel: (() -> Void)?
 
@@ -63,7 +64,7 @@ struct GitHubLoginView: View {
     init(
         account: GitHubAccount,
         workspaceId: String,
-        onAuthCookie: @escaping (String) -> Void,
+        onAuthCookie: @escaping (String, String?) -> Void,
         onCancel: (() -> Void)? = nil
     ) {
         self.account = account
@@ -108,6 +109,13 @@ struct GitHubLoginView: View {
 
     // MARK: - UI
 
+    /// header 里 workspace 文本:为空/无效时显示占位,提示登录后自动识别
+    private var workspaceCaption: String {
+        let ws = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ws.isEmpty { return "Workspace ID 登录后自动识别" }
+        return "workspace \(ws)"
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
             Image(systemName: "person.crop.circle.badge.checkmark")
@@ -115,7 +123,7 @@ struct GitHubLoginView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("用 GitHub 账号自动登录 opencode.ai")
                     .font(.headline)
-                Text("\(account.username) · workspace \(workspaceId.trimmingCharacters(in: .whitespacesAndNewlines))")
+                Text("\(account.username) · \(workspaceCaption)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -216,14 +224,17 @@ struct GitHubLoginView: View {
         }
     }
 
-    /// workspaceId 有效则直接打开工作区页(未登录会 302 到 GitHub OAuth);无效则打开登录页
+    /// workspaceId 有效则直接打开工作区页(未登录会 302 到 GitHub OAuth);
+    /// 为空/无效则打开 opencode.ai 首页:未登录时 SPA 前端自行跳转 GitHub OAuth,
+    /// 登录成功后由 opencode 前端跳回工作区页(URL 含 /workspace/{ws},自动识别回传)。
+    /// 其余逻辑(decide / 注入 / 轮询)不受起点影响。
     private func loadStartPage(in wv: WKWebView) {
         let ws = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
         let url: URL
         if QuotaClient.validateWorkspaceId(ws) == nil {
             url = service.opencodeBaseURL.appendingPathComponent("workspace").appendingPathComponent(ws)
         } else {
-            url = service.opencodeBaseURL.appendingPathComponent("login")
+            url = service.opencodeBaseURL
         }
         wv.load(URLRequest(url: url))
     }
@@ -469,7 +480,9 @@ struct GitHubLoginView: View {
         dumpFlowLog()
         wipeStore()
         currentStep = .done(authCookie: cookie)
-        onAuthCookie(cookie)
+        // 登录成功后当前 URL 通常已回到 /workspace/{ws}:把识别到的 ws 随回调带出,
+        // 供父视图回填表单/自动保存(ws 为 nil 时由父视图提示手动填写)
+        onAuthCookie(cookie, GitHubLoginService.workspaceId(from: webView?.url))
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1))
             dismiss()

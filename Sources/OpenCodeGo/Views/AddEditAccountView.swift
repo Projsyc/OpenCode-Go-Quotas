@@ -141,14 +141,12 @@ struct AddEditAccountView: View {
             }
         }
         .sheet(isPresented: $showGitHubLogin) {
-            if let account = githubStore.accounts.first(where: { $0.id == selectedGitHubAccountID }) {
+            if let githubAccount = githubStore.accounts.first(where: { $0.id == selectedGitHubAccountID }) {
                 GitHubLoginView(
-                    account: account,
+                    account: githubAccount,
                     workspaceId: workspaceId,
-                    onAuthCookie: { cookie in
-                        authCookie = cookie
-                        loginMessage = "已自动获取 Cookie,请保存 ✅"
-                        flashCookieField()
+                    onAuthCookie: { cookie, ws in
+                        handleAuthCookie(cookie, workspaceId: ws, githubUsername: githubAccount.username)
                     },
                     onCancel: {
                         loginMessage = nil
@@ -278,9 +276,8 @@ struct AddEditAccountView: View {
                     Label("开始自动登录", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedGitHubAccountID == nil
-                          || workspaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("在窗口内自动完成 GitHub 登录并捕获 opencode auth Cookie")
+                .disabled(selectedGitHubAccountID == nil)
+                .help("在窗口内自动完成 GitHub 登录并捕获 opencode auth Cookie；Workspace ID 可留空，登录成功后自动识别")
             }
 
             if let loginMessage {
@@ -289,7 +286,7 @@ struct AddEditAccountView: View {
                     .foregroundStyle(.green)
             }
 
-            Text("需要所选账号的密码;若开启两步验证,请先在该账号中保存 TOTP 密钥")
+            Text("需要所选账号的密码;若开启两步验证,请先在该账号中保存 TOTP 密钥。Workspace ID 可先留空,登录成功后自动识别并填入")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -396,6 +393,46 @@ struct AddEditAccountView: View {
         workspaceId = account.workspaceId
         notes = account.notes
         authCookie = ""
+    }
+
+    /// 登录成功回调(由 GitHubLoginView 在捕获 cookie 时触发):
+    /// 1. 回填 authCookie;回调带回了 workspaceId → 同步回填(登录起点可留空 ws);
+    /// 2. 名称为空 → 用 GitHub 用户名兜底;
+    /// 3. 新增场景(account == nil)自动保存并关闭 sheet —— 即「导入 GitHub 账号后
+    ///    登录成功自动产生 opencode 账号」(store.addAccount 不去重:同 cookie 重复 add
+    ///    会追加重复账号,故自动保存成功后立即 dismiss;用户重开表单才再走手动流程,
+    ///    重复窗口极小且结果幂等可删,不做额外去重);
+    ///    保存失败(ws 仍缺/无效等)不静默:提示具体错误并保持表单打开可修正。
+    ///    编辑场景(account != nil)不自动保存,只回填(保持现状)。
+    private func handleAuthCookie(_ cookie: String, workspaceId ws: String?, githubUsername: String) {
+        authCookie = cookie
+        loginMessage = "已自动获取 Cookie,请保存 ✅"
+        flashCookieField()
+        if let ws {
+            workspaceId = ws
+        }
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            name = githubUsername
+        }
+        guard !isEditing else { return }
+        do {
+            try save()
+            loginMessage = "已自动保存账号 ✅"
+            // 自动保存成功后关闭添加表单(延迟展示成功提示;GitHubLoginView 自身也会在
+            // 1s 后 dismiss 自己,双 dismiss 幂等)。自动保存与手点「添加」并行时,
+            // 后者会在表单关闭前多写一条重复账号 —— 概率极低且用户可直接删除,故不拦截。
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(600))
+                dismiss()
+            }
+        } catch {
+            loginMessage = nil
+            if workspaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                errorText = "未识别到 Workspace ID,请手动填写后点「添加」"
+            } else {
+                errorText = "自动保存失败:\(error.localizedDescription)"
+            }
+        }
     }
 
     private func save() throws {
