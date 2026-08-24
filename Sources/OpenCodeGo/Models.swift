@@ -16,6 +16,7 @@ struct UsageResult: Codable, Sendable, Equatable {
 }
 
 /// 账号:元数据 + 最后一次额度快照(快照便于离线查看,数据本身可能过期)
+/// 持久化范围:仅元数据 + usage 快照;usageError/history/historyError/historyLoading 仅内存
 struct Account: Codable, Identifiable, Sendable, Equatable {
     var id: UUID
     var name: String
@@ -24,14 +25,22 @@ struct Account: Codable, Identifiable, Sendable, Equatable {
     var createdAt: Date
     var updatedAt: Date
 
-    /// 最后一次成功抓取的额度(持久化,非实时)
+    /// 最后一次成功抓取的额度快照(持久化,非实时;便于离线查看)
     var usage: UsageResult?
-    /// 最近一次刷新的错误(仅内存,不持久化)
+    /// 最近一次刷新的错误(仅内存;CodingKeys 未列入,不参与 JSON 编解码)
     var usageError: String?
-    /// 用量历史(仅内存,不持久化)
+    /// 用量历史(仅内存;CodingKeys 未列入,不参与 JSON 编解码)
     var history: [UsageHistoryItem]?
+    /// 用量历史加载错误(仅内存;CodingKeys 未列入,不参与 JSON 编解码)
     var historyError: String?
+    /// 用量历史加载中(仅内存;CodingKeys 未列入,不参与 JSON 编解码)
     var historyLoading: Bool
+
+    /// 只持久化元数据 + usage 快照;4 个 transient 字段不参与 encode,
+    /// decode 时老 JSON 中残留的 transient 键被自动忽略(字段回到内存默认值)
+    enum CodingKeys: String, CodingKey {
+        case id, name, workspaceId, notes, createdAt, updatedAt, usage
+    }
 
     init(
         id: UUID = UUID(),
@@ -57,6 +66,33 @@ struct Account: Codable, Identifiable, Sendable, Equatable {
         self.history = history
         self.historyError = historyError
         self.historyLoading = historyLoading
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        workspaceId = try c.decode(String.self, forKey: .workspaceId)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        usage = try c.decodeIfPresent(UsageResult.self, forKey: .usage)
+        // 仅内存字段:老格式 JSON 即使含这些键也忽略,一律回到默认值
+        usageError = nil
+        history = nil
+        historyError = nil
+        historyLoading = false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(workspaceId, forKey: .workspaceId)
+        try c.encode(notes, forKey: .notes)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encodeIfPresent(usage, forKey: .usage)
     }
 }
 
