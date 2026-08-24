@@ -8,6 +8,8 @@ final class AccountStore {
     private(set) var accounts: [Account] = []
     /// 演示模式(启动参数 --demo):注入假数据,不发起真实请求
     private(set) var demoMode = false
+    /// 账号数据文件读取/解码失败时的用户可见错误(仅启动加载时置位)
+    private(set) var loadError: String?
 
     private let keychain: KeychainStoring
     private let client: QuotaClient
@@ -42,10 +44,44 @@ final class AccountStore {
     // MARK: - 持久化
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([Account].self, from: data)
-        else { return }
-        accounts = decoded
+        // 文件不存在 → 首次运行,空列表正常,不报错
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            accounts = try JSONDecoder().decode([Account].self, from: Data(contentsOf: fileURL))
+        } catch {
+            // 文件存在但读取/解码失败 → 备份原文件后置空,绝不静默清空
+            // (否则下次 save() 全量原子覆盖会永久丢失真实账号元数据)
+            accounts = []
+            if let backupName = backupCorruptedFile() {
+                loadError = "账号数据文件损坏，已备份为 \(backupName)，请检查后重新添加"
+            } else {
+                loadError = "账号数据文件损坏，且备份失败，请检查后重新添加"
+            }
+        }
+    }
+
+    /// 把损坏的 accounts.json 移动备份为 accounts.json.bak-<时间戳>(同秒冲突自动加序号)。
+    /// 返回备份文件名;备份失败返回 nil。
+    @discardableResult
+    private func backupCorruptedFile() -> String? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let stamp = formatter.string(from: Date())
+        let dir = fileURL.deletingLastPathComponent()
+        var backupName = "accounts.json.bak-\(stamp)"
+        var backupURL = dir.appendingPathComponent(backupName)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: backupURL.path) {
+            backupName = "accounts.json.bak-\(stamp)-\(suffix)"
+            backupURL = dir.appendingPathComponent(backupName)
+            suffix += 1
+        }
+        do {
+            try FileManager.default.moveItem(at: fileURL, to: backupURL)
+            return backupName
+        } catch {
+            return nil
+        }
     }
 
     private func save() {
@@ -80,13 +116,14 @@ final class AccountStore {
         notes: String
     ) throws {
         guard let i = accounts.firstIndex(where: { $0.id == id }) else { return }
+        // 先写 Keychain,成功后再改内存 + save:set 抛错时内存/磁盘保持原状,不产生不一致
+        if let cookie = authCookie?.trimmingCharacters(in: .whitespacesAndNewlines), !cookie.isEmpty {
+            try keychain.set(cookie, forKey: id.uuidString)
+        }
         accounts[i].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         accounts[i].workspaceId = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
         accounts[i].notes = notes
         accounts[i].updatedAt = Date()
-        if let cookie = authCookie?.trimmingCharacters(in: .whitespacesAndNewlines), !cookie.isEmpty {
-            try keychain.set(cookie, forKey: id.uuidString)
-        }
         save()
     }
 
@@ -114,13 +151,18 @@ final class AccountStore {
         do {
             let usage = try await client.fetchGoQuota(
                 workspaceId: account.workspaceId, authCookie: cookie)
+            // await 期间账号可能被删除/前移 → 恢复后必须按 id 重查下标;
+            // 已删除则静默返回(不写、不报错)
+            guard let i = accounts.firstIndex(where: { $0.id == account.id }) else { return }
             accounts[i].usage = usage
             accounts[i].updatedAt = Date()
             accounts[i].usageError = nil
+            save()
         } catch {
+            guard let i = accounts.firstIndex(where: { $0.id == account.id }) else { return }
             accounts[i].usageError = error.localizedDescription
+            save()
         }
-        save()
     }
 
     func refreshAll() async {
@@ -138,16 +180,23 @@ final class AccountStore {
         }
         accounts[i].historyLoading = true
         accounts[i].historyError = nil
-        defer { accounts[i].historyLoading = false }
         guard let cookie = keychain.get(account.id.uuidString) else {
             accounts[i].historyError = "未找到 Cookie，请重新添加账号"
+            accounts[i].historyLoading = false
             return
         }
         do {
-            accounts[i].history = try await Self.fetchAllHistoryPages(
+            let history = try await Self.fetchAllHistoryPages(
                 client: client, workspaceId: account.workspaceId, authCookie: cookie)
+            // await 期间账号可能被删除 → 按 id 重查;已删除则无需清理 loading(账号已不在数组)
+            guard let i = accounts.firstIndex(where: { $0.id == account.id }) else { return }
+            accounts[i].history = history
+            accounts[i].historyError = nil
+            accounts[i].historyLoading = false
         } catch {
+            guard let i = accounts.firstIndex(where: { $0.id == account.id }) else { return }
             accounts[i].historyError = error.localizedDescription
+            accounts[i].historyLoading = false
         }
     }
 
