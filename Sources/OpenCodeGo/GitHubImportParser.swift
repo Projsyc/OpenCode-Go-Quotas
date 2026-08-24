@@ -70,7 +70,7 @@ enum GitHubImportParser {
 
         if fields.count == 3 {
             let credential = fields[2]
-            let kind = GitHubCredentialKind.kind(for: credential)
+            let kind = GitHubCredentialKind.kindStrict(for: credential)
             guard !credential.isEmpty, let kind else {
                 throw GitHubParseError.invalidRow(
                     line: lineNumber,
@@ -177,5 +177,25 @@ enum GitHubImportParser {
 
     private static func trimField(_ field: String) -> String {
         field.trimmingCharacters(in: .whitespaces)
+    }
+}
+
+// MARK: - 严格凭据类型判定
+
+extension GitHubCredentialKind {
+    /// 按内容推断凭据类型(严格版,供导入/编辑等入库路径使用):
+    /// 与 `kind(for:)` 规则一致,但 base32 采用 RFC 4648 严格解码
+    /// (`TOTPGenerator.decodeBase32Strict`),被截断/非法 padding 的 secret
+    /// 不再被误判为 TOTP。`kind(for:)`(宽松版)保留供既有调用与测试兼容。
+    static func kindStrict(for credential: String) -> GitHubCredentialKind? {
+        let value = credential.trimmingCharacters(in: .whitespaces)
+        if value.count == 6,
+           value.allSatisfy({ $0.isASCII && $0.isWholeNumber }) {
+            return .oneTimeCode
+        }
+        if let decoded = TOTPGenerator.decodeBase32Strict(value), decoded.count >= 8 {
+            return .totpSecret
+        }
+        return nil
     }
 }

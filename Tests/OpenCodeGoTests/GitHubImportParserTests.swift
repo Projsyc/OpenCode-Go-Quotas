@@ -71,6 +71,32 @@ final class GitHubImportParserTests: XCTestCase {
         XCTAssertNil(GitHubCredentialKind.kind(for: "   "))
     }
 
+    /// L5:严格判定 —— 截断/非法 padding 的 secret 不再被识别为 TOTP(入库路径)
+    func testCredentialKindStrictRejectsTruncatedSecret() {
+        // 截断的 secret:宽松解码能解出 ≥ 8 字节,严格判定必须拒绝
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQGE"))
+        // 余量位非 0 / '=' 位置非法
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZDGNB"))
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZD=GNBVGY3TQOJQ"))
+        // 合法样本仍识别(与宽松版一致)
+        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQ"), .totpSecret)
+        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQ===="), .totpSecret)
+        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "123456"), .oneTimeCode)
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "ABC123"))
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: ""))
+    }
+
+    /// L5:导入路径用严格判定,截断 secret 整行报格式无效
+    func testParseRejectsTruncatedSecretCredential() {
+        XCTAssertThrowsError(try GitHubImportParser.parse("u1,pass1234,GEZDGNBVGY3TQOJQGE")) { error in
+            XCTAssertEqual(error as? GitHubParseError,
+                           .invalidRow(line: 1, reason: "验证码/TOTP secret 格式无效"))
+        }
+        // 完整 secret 正常通过
+        let rows = try GitHubImportParser.parse("u1,pass1234,GEZDGNBVGY3TQOJQ")
+        XCTAssertEqual(rows[0].kind, .totpSecret)
+    }
+
     /// S2:逐行解析入口(供预览复用,与 parse 全量路径共用判定)
     func testParseRow() throws {
         // 空行 / 纯空白 / 注释行 → nil(跳过)
