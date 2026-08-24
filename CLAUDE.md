@@ -6,14 +6,18 @@ OpenCode Go 多账号额度查询 + GitHub 多账号管理的原生 macOS 应用
 
 ```
 Sources/OpenCodeGo/
-├── OpenCodeGoApp.swift        # @main,WindowGroup,注入 AccountStore
-├── Models.swift               # UsageWindow/UsageResult/Account/UsageHistoryItem
+├── OpenCodeGoApp.swift        # @main,WindowGroup,注入 AccountStore + GitHubAccountStore
+├── Models.swift               # UsageWindow/UsageResult/Account/UsageHistoryItem + GitHubAccount/GitHubCredentialKind
 ├── AccountStore.swift         # opencode 账号:元数据 JSON + Cookie 存 Keychain
+├── GitHubAccountStore.swift   # GitHub 账号:元数据 JSON(github-accounts.json)+ 密码/凭据存 Keychain
 ├── QuotaClient.swift          # opencode.ai 额度/历史抓取(页面解析 + /_server RPC)
-├── KeychainHelper.swift       # 轻量 Keychain 封装(service: com.acccan.opencode-go)
+├── TOTPGenerator.swift        # RFC 6238 TOTP 验证码生成(base32 解码 + HMAC-SHA1 + 倒计时)
+├── GitHubImportParser.swift   # 批量导入解析:Tab/逗号/分号/空格,CSV 引号,凭据类型推断
+├── KeychainHelper.swift       # 轻量 Keychain 封装(service: com.acccan.opencode-go / -github)
 ├── BrowserCookieService.swift # 从 Chrome/Edge 解密读取 opencode.ai auth Cookie
 ├── Graphics/                  # SVGPath 解析、Theme 色板、GaugeRing 仪表环、Avatar、渐变标题
 └── Views/                     # ContentView / AccountCardView / AddEditAccountView / UsageHistoryView
+                               # + GitHubAccountCardView / GitHubEditView / GitHubImportView
 ```
 
 ## 数据安全红线(任何改动都不得违反)
@@ -21,7 +25,9 @@ Sources/OpenCodeGo/
 1. **`~/Library/Application Support/OpenCodeGo/accounts.json` 是用户真实数据**(现有 10 个
    opencode 账号)。代码只能**向后兼容**地读它:修改 `Account` 模型只能加可选字段,绝不
    改字段名/删除字段/改变解码语义。测试绝不允许读写真实路径。
-2. **敏感数据只进 Keychain**(Cookie/密码/TOTP secret),不落盘、不打印、不上传。
+2. **敏感数据只进 Keychain**(Cookie/密码/TOTP secret),不落盘、不打印、不上传。GitHub 的
+   密码 / TOTP secret / 一次性验证码同样只进 Keychain(service `com.acccan.opencode-go.github`),
+   **`github-accounts.json` 不得含任何敏感字段**。
 3. 元数据 JSON 里不得出现任何密码/Cookie/secret 字段。
 4. 测试必须用注入的临时目录 + 内存 Keychain mock,绝不碰真实存储。
 
