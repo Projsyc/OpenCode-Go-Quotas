@@ -70,13 +70,20 @@ enum GitHubImportParser {
 
         if fields.count == 3 {
             let credential = fields[2]
-            let kind = GitHubCredentialKind.kind(for: credential)
-            guard !credential.isEmpty, let kind else {
+            if credential.isEmpty {
+                // 尾随分隔符 / Excel 导出的空第三列 → 视为未提供凭据(与 2 列一致),
+                // 避免「一行空列」让整份导入在第一处无效行即中止
+                return GitHubImportRow(
+                    lineNumber: lineNumber,
+                    username: username,
+                    password: password,
+                    credential: nil,
+                    kind: nil)
+            }
+            guard let kind = GitHubCredentialKind.kind(for: credential) else {
                 throw GitHubParseError.invalidRow(
                     line: lineNumber,
-                    reason: credential.isEmpty
-                        ? "第三列(验证码/TOTP secret)为空"
-                        : "验证码/TOTP secret 格式无效")
+                    reason: "验证码/TOTP secret 格式无效")
             }
             return GitHubImportRow(
                 lineNumber: lineNumber,
@@ -114,7 +121,9 @@ enum GitHubImportParser {
 
     // MARK: - 私有
 
-    /// 按行检测分隔符并切分:Tab > 逗号 > 分号 > 空格(空格要求恰好 3 列,避免误拆带空格的用户名)
+    /// 按行检测分隔符并切分:Tab > 逗号 > 分号 > 空格。
+    /// 空格分隔接受 2~3 列(2 列 = 用户名+密码,无歧义;3 列 = 用户名+密码+凭据);
+    /// 4 列及以上无法区分「带空格的密码」与多余列,报错并提示换用逗号/Tab。
     private static func splitFields(_ line: String, lineNumber: Int) throws -> [String] {
         if line.contains("\t") {
             return try csvSplit(line, delimiter: "\t", lineNumber: lineNumber).map(trimField)
@@ -126,10 +135,12 @@ enum GitHubImportParser {
             return try csvSplit(line, delimiter: ";", lineNumber: lineNumber).map(trimField)
         }
         let tokens = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        guard tokens.count == 3 else {
+        guard tokens.count >= 2, tokens.count <= 3 else {
             throw GitHubParseError.invalidRow(
                 line: lineNumber,
-                reason: "空格分隔需恰好 3 列(用户名 密码 验证码/TOTP),实际 \(tokens.count) 列")
+                reason: tokens.count < 2
+                    ? "空格分隔列数不足(应包含用户名和密码)"
+                    : "空格分隔最多 3 列,实际 \(tokens.count) 列(密码含空格请用逗号/Tab 分隔)")
         }
         return tokens
     }

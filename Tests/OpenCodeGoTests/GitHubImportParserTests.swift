@@ -112,7 +112,7 @@ final class GitHubImportParserTests: XCTestCase {
         // 无效行 → 抛带行号的错误
         XCTAssertThrowsError(try GitHubImportParser.parseRow("onlyuser", lineNumber: 5)) { error in
             XCTAssertEqual(error as? GitHubParseError,
-                           .invalidRow(line: 5, reason: "空格分隔需恰好 3 列(用户名 密码 验证码/TOTP),实际 1 列"))
+                           .invalidRow(line: 5, reason: "空格分隔列数不足(应包含用户名和密码)"))
         }
     }
 
@@ -146,12 +146,47 @@ final class GitHubImportParserTests: XCTestCase {
         }
     }
 
-    func testSpaceRequiresExactlyThreeColumns() {
-        // 空格分隔但只有 2 列 → 行错误(避免把带空格的用户名误拆)
-        XCTAssertThrowsError(try GitHubImportParser.parse("user1 pass123")) { error in
+    func testSpaceRequiresExactlyThreeColumns() throws {
+        // 2 列空格分隔(用户名 密码)→ 与逗号/Tab 一致,支持无凭据账号(2 token 无歧义)
+        let two = try GitHubImportParser.parse("user1 pass123456")
+        XCTAssertEqual(two.count, 1)
+        XCTAssertEqual(two[0].username, "user1")
+        XCTAssertEqual(two[0].password, "pass123456")
+        XCTAssertNil(two[0].credential)
+        XCTAssertNil(two[0].kind)
+    }
+
+    func testSpaceSeparatedFourColumnsRejected() {
+        // 4 列及以上无法区分「带空格的密码」与多余列 → 报错并提示换用逗号/Tab
+        XCTAssertThrowsError(try GitHubImportParser.parse("user1 pass word 123456")) { error in
             XCTAssertEqual(error as? GitHubParseError,
-                           .invalidRow(line: 1, reason: "空格分隔需恰好 3 列(用户名 密码 验证码/TOTP),实际 2 列"))
+                           .invalidRow(line: 1, reason: "空格分隔最多 3 列,实际 4 列(密码含空格请用逗号/Tab 分隔)"))
         }
+    }
+
+    /// ghaudit:第三列为空(尾随分隔符 / Excel 空列)→ 视为未提供凭据,不再整行报错
+    func testEmptyThirdColumnTreatedAsNoCredential() throws {
+        let rows = try GitHubImportParser.parse("user1,pass1234,\nuser2;pass5678;\nuser3\tpass9012\t")
+        XCTAssertEqual(rows.count, 3)
+        for row in rows {
+            XCTAssertNil(row.credential)
+            XCTAssertNil(row.kind)
+        }
+        XCTAssertEqual(rows[2].password, "pass9012")
+        // 空第三列不阻塞后续有效行(parse 全量路径首错即抛 → 一行空列毁掉整份导入的回归)
+        let mixed = try GitHubImportParser.parse("user1,pass1234,\nuser2,pass5678,GEZDGNBVGY3TQOJQ")
+        XCTAssertEqual(mixed.count, 2)
+        XCTAssertEqual(mixed[1].kind, .totpSecret)
+    }
+
+    /// ghaudit:CRLF 行尾(Excel/Windows 导出)→ 不被 \r 污染字段
+    func testCRLFLines() throws {
+        let rows = try GitHubImportParser.parse("user1,pass1234,GEZDGNBVGY3TQOJQ\r\nuser2,pass5678\r\n# 注释\r\n")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].username, "user1")
+        XCTAssertEqual(rows[1].username, "user2")
+        XCTAssertEqual(rows[1].password, "pass5678")
+        XCTAssertEqual(rows.map(\.lineNumber), [1, 2])
     }
 
     func testCSVQuotedFieldWithDelimiter() throws {
