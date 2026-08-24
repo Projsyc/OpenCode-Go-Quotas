@@ -26,6 +26,9 @@ struct GitHubLoginView: View {
     @State private var oneTimeCode: String?
 
     // WebView 与导航
+    // 注:onDisappear 必须显式置空这两者,断开「navigator → onFinish 闭包 → self →
+    // @State 存储 → navigator/webView」的强环,否则 WKWebView 在 sheet 关闭后永不释放
+    // (每次打开泄漏一个,含 WebContent 进程)。详见 onDisappear 注释。
     @State private var webView: WKWebView?
     @State private var navigator: LoginNavigator?
 
@@ -64,6 +67,22 @@ struct GitHubLoginView: View {
         .onDisappear {
             stopPolling()
             stopTimeout()
+            // 兜底清理:sheet 被编程式关闭 / 窗口直接关闭时,成功/取消/超时三条路径都
+            // 不会走到 wipeStore,这里全清 nonPersistent 会话,不留 Cookie 残留。
+            // removeData 幂等,与其余清理路径重复调用安全。
+            wipeStore()
+            // 断环(WebView 泄漏修复):强引用链为
+            //   @State 存储 → navigator → onFinish 闭包 → self(struct) → @State 存储
+            //  → { navigator, webView }
+            // 而 WKWebView 对 navigationDelegate 是弱引用(WebKit 系统属性),故唯一
+            // 强环收敛在 @State 存储与 navigator 之间。置空后:
+            //   · navigator 无任何强引用 → 立即释放,其弱委托同步置 nil,不再回调,
+            //     handleNavigation 不会被调用,无需 Coordinator 收拢逻辑;
+            //   · webView 不再被存储持有,随 SwiftUI 视图移除(NSViewRepresentable
+            //     释放)而释放。
+            // 不置空的话 sheet 关闭后 WKWebView 永不释放,每次打开泄漏一个。
+            navigator = nil
+            webView = nil
         }
     }
 
