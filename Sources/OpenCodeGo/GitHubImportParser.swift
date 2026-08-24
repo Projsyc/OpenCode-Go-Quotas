@@ -70,7 +70,7 @@ enum GitHubImportParser {
 
         if fields.count == 3 {
             let credential = fields[2]
-            let kind = GitHubCredentialKind.kind(for: credential)
+            let kind = GitHubCredentialKind.kindStrict(for: credential)
             guard !credential.isEmpty, let kind else {
                 throw GitHubParseError.invalidRow(
                     line: lineNumber,
@@ -95,10 +95,21 @@ enum GitHubImportParser {
 
     /// 解析 CSV 文件数据(假定 UTF-8;编码无效按第 1 行报错)
     static func parseCSV(data: Data) throws -> [GitHubImportRow] {
-        guard let text = String(data: data, encoding: .utf8) else {
+        guard let text = decodeUTF8Text(data) else {
             throw GitHubParseError.invalidRow(line: 1, reason: "文件不是有效的 UTF-8 文本")
         }
         return try parse(text)
+    }
+
+    /// 解码 UTF-8 文本并剥离文件开头的前缀 BOM(U+FEFF);非 UTF-8 返回 nil。
+    /// parseCSV 与视图 loadFile 共用此解码路径,避免 BOM 混入首行用户名
+    /// 导致自动登录静默失败。
+    static func decodeUTF8Text(_ data: Data) -> String? {
+        guard var text = String(data: data, encoding: .utf8) else { return nil }
+        if text.hasPrefix("\u{FEFF}") {
+            text.removeFirst()
+        }
+        return text
     }
 
     // MARK: - 私有
@@ -166,5 +177,25 @@ enum GitHubImportParser {
 
     private static func trimField(_ field: String) -> String {
         field.trimmingCharacters(in: .whitespaces)
+    }
+}
+
+// MARK: - 严格凭据类型判定
+
+extension GitHubCredentialKind {
+    /// 按内容推断凭据类型(严格版,供导入/编辑等入库路径使用):
+    /// 与 `kind(for:)` 规则一致,但 base32 采用 RFC 4648 严格解码
+    /// (`TOTPGenerator.decodeBase32Strict`),被截断/非法 padding 的 secret
+    /// 不再被误判为 TOTP。`kind(for:)`(宽松版)保留供既有调用与测试兼容。
+    static func kindStrict(for credential: String) -> GitHubCredentialKind? {
+        let value = credential.trimmingCharacters(in: .whitespaces)
+        if value.count == 6,
+           value.allSatisfy({ $0.isASCII && $0.isWholeNumber }) {
+            return .oneTimeCode
+        }
+        if let decoded = TOTPGenerator.decodeBase32Strict(value), decoded.count >= 8 {
+            return .totpSecret
+        }
+        return nil
     }
 }

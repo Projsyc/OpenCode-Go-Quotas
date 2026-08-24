@@ -42,6 +42,36 @@ final class TOTPGeneratorTests: XCTestCase {
         XCTAssertNil(TOTPGenerator.generate(secretBase32: "====", at: Date()))
     }
 
+    /// L5:严格解码拒绝截断/非规范输入(宽松解码能"成功"解出的样本,严格必须拒绝)
+    func testStrictDecodeRejectsTruncatedAndMalformed() {
+        // 截断到非完整块的 secret(18 字符,宽松解出 11 字节 ≥ 8)→ 拒绝
+        XCTAssertNil(TOTPGenerator.decodeBase32Strict("GEZDGNBVGY3TQOJQGE"))
+        XCTAssertNil(TOTPGenerator.generate(secretBase32: "GEZDGNBVGY3TQOJQGE", at: Date()))
+        // 7 字符截断,末字符含非零余量位 → 拒绝
+        XCTAssertNil(TOTPGenerator.decodeBase32Strict("GEZDGNB"))
+        // '=' 出现在非尾部 / padding 后还有数据字符 → 拒绝
+        XCTAssertNil(TOTPGenerator.decodeBase32Strict("GEZD=GNBVGY3TQOJQ"))
+        XCTAssertNil(TOTPGenerator.decodeBase32Strict("GEZDGNBVGY3TQOJQ=GEZDGNBV"))
+        // 规范长度需要 >2 个 padding(26 字符需 6 个 '=')→ 拒绝
+        XCTAssertNil(TOTPGenerator.decodeBase32Strict("GEZDGNBVGY3TQOJQGEZDGNBVGY"))
+        // 空/纯 padding → 拒绝
+        XCTAssertNil(TOTPGenerator.decodeBase32Strict(""))
+        XCTAssertNil(TOTPGenerator.decodeBase32Strict("===="))
+        // 非法字符 → 拒绝
+        XCTAssertNil(TOTPGenerator.decodeBase32Strict("ABC8DEF"))
+    }
+
+    /// L5:严格解码接受全部合法变体(与宽松版解码结果一致)
+    func testStrictDecodeAcceptsLegalVariants() {
+        XCTAssertEqual(TOTPGenerator.decodeBase32Strict("GEZDGNBVGY3TQOJQ")?.count, 10)
+        XCTAssertEqual(TOTPGenerator.decodeBase32Strict("gezdgnbvgy3tqojq")?.count, 10)
+        XCTAssertEqual(TOTPGenerator.decodeBase32Strict("GEZDGNBV GY3TQOJQ")?.count, 10)
+        XCTAssertEqual(TOTPGenerator.decodeBase32Strict("GEZDGNBVGY3TQOJQ====")?.count, 10) // 冗余尾部 '=' 容忍
+        XCTAssertEqual(TOTPGenerator.decodeBase32Strict("GEZDGNBVGY3TQOJQ\n")?.count, 10)
+        // 7 字符 + 1 padding 且余量位为 0 的合法样本
+        XCTAssertEqual(TOTPGenerator.decodeBase32Strict("GEZDGAA=")?.count, 4)
+    }
+
     func testRemainingSecondsBoundaries() {
         XCTAssertEqual(TOTPGenerator.remainingSeconds(at: Date(timeIntervalSince1970: 0)), 30)
         XCTAssertEqual(TOTPGenerator.remainingSeconds(at: Date(timeIntervalSince1970: 1)), 29)

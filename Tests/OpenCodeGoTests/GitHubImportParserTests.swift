@@ -71,6 +71,32 @@ final class GitHubImportParserTests: XCTestCase {
         XCTAssertNil(GitHubCredentialKind.kind(for: "   "))
     }
 
+    /// L5:严格判定 —— 截断/非法 padding 的 secret 不再被识别为 TOTP(入库路径)
+    func testCredentialKindStrictRejectsTruncatedSecret() {
+        // 截断的 secret:宽松解码能解出 ≥ 8 字节,严格判定必须拒绝
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQGE"))
+        // 余量位非 0 / '=' 位置非法
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZDGNB"))
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "GEZD=GNBVGY3TQOJQ"))
+        // 合法样本仍识别(与宽松版一致)
+        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQ"), .totpSecret)
+        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "GEZDGNBVGY3TQOJQ===="), .totpSecret)
+        XCTAssertEqual(GitHubCredentialKind.kindStrict(for: "123456"), .oneTimeCode)
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: "ABC123"))
+        XCTAssertNil(GitHubCredentialKind.kindStrict(for: ""))
+    }
+
+    /// L5:导入路径用严格判定,截断 secret 整行报格式无效
+    func testParseRejectsTruncatedSecretCredential() throws {
+        XCTAssertThrowsError(try GitHubImportParser.parse("u1,pass1234,GEZDGNBVGY3TQOJQGE")) { error in
+            XCTAssertEqual(error as? GitHubParseError,
+                           .invalidRow(line: 1, reason: "验证码/TOTP secret 格式无效"))
+        }
+        // 完整 secret 正常通过
+        let rows = try GitHubImportParser.parse("u1,pass1234,GEZDGNBVGY3TQOJQ")
+        XCTAssertEqual(rows[0].kind, .totpSecret)
+    }
+
     /// S2:逐行解析入口(供预览复用,与 parse 全量路径共用判定)
     func testParseRow() throws {
         // 空行 / 纯空白 / 注释行 → nil(跳过)
@@ -162,6 +188,28 @@ final class GitHubImportParserTests: XCTestCase {
             XCTAssertEqual(error as? GitHubParseError,
                            .invalidRow(line: 1, reason: "文件不是有效的 UTF-8 文本"))
         }
+    }
+
+    /// M2:CSV 文件导入剥离 UTF-8 前缀 BOM(U+FEFF),避免首行用户名入库为 "\u{FEFF}user1"
+    func testParseCSVStripsBOM() throws {
+        let data = Data("\u{FEFF}user1,pass1234,GEZDGNBVGY3TQOJQ\nuser2,pass5678,123456".utf8)
+        let rows = try GitHubImportParser.parseCSV(data: data)
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].username, "user1")
+        XCTAssertFalse(rows[0].username.hasPrefix("\u{FEFF}"))
+        XCTAssertEqual(rows[1].username, "user2")
+        XCTAssertEqual(rows[1].kind, .oneTimeCode)
+        // 仅 BOM + 空白 → 剥离后无内容,按空输入处理
+        XCTAssertThrowsError(try GitHubImportParser.parseCSV(data: Data("\u{FEFF}\n  ".utf8))) { error in
+            XCTAssertEqual(error as? GitHubParseError, .emptyInput)
+        }
+    }
+
+    /// M2:decodeUTF8Text 共用解码入口(parseCSV 与视图 loadFile 同路径)
+    func testDecodeUTF8TextStripsBOM() {
+        XCTAssertEqual(GitHubImportParser.decodeUTF8Text(Data("\u{FEFF}abc".utf8)), "abc")
+        XCTAssertEqual(GitHubImportParser.decodeUTF8Text(Data("abc".utf8)), "abc")
+        XCTAssertNil(GitHubImportParser.decodeUTF8Text(Data([0xff, 0xfe, 0x00, 0x41])))
     }
 
     func testLineNumbersWithCommentsAndBlanks() throws {

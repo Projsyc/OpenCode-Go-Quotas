@@ -67,7 +67,7 @@ struct GitHubEditView: View {
                     .font(.system(.body, design: .monospaced))
                     .autocorrectionDisabled()
                     .onChange(of: credential) { _, newValue in
-                        if let inferred = GitHubCredentialKind.kind(for: newValue) {
+                        if let inferred = GitHubCredentialKind.kindStrict(for: newValue) {
                             kind = inferred
                         }
                     }
@@ -170,11 +170,15 @@ struct GitHubEditView: View {
         let passwordValue = password.trimmingCharacters(in: .whitespacesAndNewlines)
         let credentialValue = credential.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // 有凭据但未显式选择类型时按内容推断;推断不出则报错
+        // 有凭据但未显式选择类型时按内容推断(严格 base32,截断 secret 推断不出);推断不出则报错
         var effectiveKind = kind
         if !credentialValue.isEmpty, effectiveKind == nil {
-            effectiveKind = GitHubCredentialKind.kind(for: credentialValue)
+            effectiveKind = GitHubCredentialKind.kindStrict(for: credentialValue)
             guard effectiveKind != nil else { throw SaveError.message("验证码/TOTP 密钥格式无效") }
+        }
+        // L6:凭据为空但用户改过类型(编辑态与已存类型不一致)→ 明确报错,不再静默丢弃用户选择
+        if credentialValue.isEmpty, effectiveKind != nil, effectiveKind != account?.credentialKind {
+            throw SaveError.message("请先填写验证码/TOTP 密钥")
         }
         let notesValue = notes.trimmingCharacters(in: .whitespacesAndNewlines)
 
