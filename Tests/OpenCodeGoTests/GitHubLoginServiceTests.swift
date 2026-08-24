@@ -286,6 +286,51 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertNil(GitHubLoginService.extractAuthCookie(from: cookies, oauthStarted: false))
     }
 
+    // MARK: - workspaceId(from:)(登录成功后回传识别)
+
+    func testWorkspaceIdFromValidWorkspacePath() {
+        XCTAssertEqual(
+            GitHubLoginService.workspaceId(from: url("https://opencode.ai/workspace/wrk_abc123")),
+            "wrk_abc123")
+    }
+
+    /// SPA 跳转可能产生尾斜杠(/workspace/wrk_xxx/),应容忍
+    func testWorkspaceIdFromPathWithTrailingSlash() {
+        XCTAssertEqual(
+            GitHubLoginService.workspaceId(from: url("https://opencode.ai/workspace/wrk_abc123/")),
+            "wrk_abc123")
+    }
+
+    func testWorkspaceIdAcceptsOpenCodeSubdomain() {
+        XCTAssertEqual(
+            GitHubLoginService.workspaceId(from: url("https://dashboard.opencode.ai/workspace/wrk_sub123")),
+            "wrk_sub123")
+    }
+
+    func testWorkspaceIdRejectsInvalidPaths() {
+        XCTAssertNil(GitHubLoginService.workspaceId(from: url("https://opencode.ai/workspace/")),
+                     "空段不得识别")
+        XCTAssertNil(GitHubLoginService.workspaceId(from: url("https://opencode.ai/login")),
+                     "登录页无 workspace 段")
+        XCTAssertNil(GitHubLoginService.workspaceId(from: url("https://opencode.ai/")),
+                     "首页无 workspace 段")
+        XCTAssertNil(GitHubLoginService.workspaceId(from: url("https://opencode.ai/workspace/wrk_x/y")),
+                     "段内含斜杠不得识别")
+        XCTAssertNil(GitHubLoginService.workspaceId(from: url("https://github.com/workspace/wrk_abc")),
+                     "非 opencode 域不得识别")
+    }
+
+    func testWorkspaceIdRejectsInvalidFormatSegment() {
+        XCTAssertNil(GitHubLoginService.workspaceId(from: url("https://opencode.ai/workspace/not-wrk-format")),
+                     "非 wrk_xxx 格式不得识别")
+        XCTAssertNil(GitHubLoginService.workspaceId(from: url("https://opencode.ai/workspace/wrk_")),
+                     "wrk_ 后无字符不得识别")
+    }
+
+    func testWorkspaceIdFromNilReturnsNil() {
+        XCTAssertNil(GitHubLoginService.workspaceId(from: nil))
+    }
+
     // MARK: - JS 构造与转义
 
     func testFillCredentialsJSEscapesSpecialChars() {
