@@ -3,6 +3,7 @@ import SwiftUI
 /// 添加 / 编辑账号:支持从 Chrome / Edge 一键导入 Cookie,也可手动填写
 struct AddEditAccountView: View {
     @Environment(AccountStore.self) private var store
+    @Environment(GitHubAccountStore.self) private var githubStore
     @Environment(\.dismiss) private var dismiss
 
     let account: Account?
@@ -23,6 +24,11 @@ struct AddEditAccountView: View {
     @State private var importMessage: String?
     @State private var importChecked = false
     @State private var hoveredCandidate: String?
+
+    // GitHub 账号自动登录
+    @State private var selectedGitHubAccountID: UUID?
+    @State private var showGitHubLogin = false
+    @State private var loginMessage: String?
 
     private enum Field: Hashable {
         case cookie
@@ -48,6 +54,8 @@ struct AddEditAccountView: View {
             }
 
             importSection
+
+            githubLoginSection
 
             Form {
                 TextField("账号名称（如：主账号）", text: $name)
@@ -114,8 +122,34 @@ struct AddEditAccountView: View {
         }
         .padding(24)
         .frame(width: 480)
-        .onAppear { prefill() }
+        .onAppear {
+            prefill()
+            if selectedGitHubAccountID == nil, let first = githubStore.accounts.first {
+                selectedGitHubAccountID = first.id
+            }
+        }
         .task { await detect() }
+        .onChange(of: githubStore.accounts) { _, accounts in
+            if let sel = selectedGitHubAccountID, !accounts.contains(where: { $0.id == sel }) {
+                selectedGitHubAccountID = accounts.first?.id
+            }
+        }
+        .sheet(isPresented: $showGitHubLogin) {
+            if let account = githubStore.accounts.first(where: { $0.id == selectedGitHubAccountID }) {
+                GitHubLoginView(
+                    account: account,
+                    workspaceId: workspaceId,
+                    onAuthCookie: { cookie in
+                        authCookie = cookie
+                        loginMessage = "已自动获取 Cookie,请保存 ✅"
+                        flashCookieField()
+                    },
+                    onCancel: {
+                        loginMessage = nil
+                    }
+                )
+            }
+        }
     }
 
     // MARK: - 浏览器导入
@@ -192,6 +226,64 @@ struct AddEditAccountView: View {
             }
 
             Text("读取 Keychain 加密口令时系统可能弹出一次授权提示；Cookie 仅保存在本机 Keychain，不会上传")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08))))
+    }
+
+    // MARK: - GitHub 账号自动登录
+
+    /// 用已导入的 GitHub 账号在应用内完成 opencode.ai 登录并捕获 auth Cookie
+    private var githubLoginSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "person.crop.circle.badge.checkmark")
+                    .foregroundStyle(.purple)
+                Text("用 GitHub 账号自动登录")
+                    .font(.callout.weight(.semibold))
+                Spacer()
+                if !githubStore.accounts.isEmpty {
+                    Picker("", selection: $selectedGitHubAccountID) {
+                        ForEach(githubStore.accounts) { a in
+                            Text(a.username).tag(Optional(a.id))
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+                }
+            }
+
+            if githubStore.accounts.isEmpty {
+                Label("请先在 GitHub 账号页导入账号", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Button {
+                    loginMessage = nil
+                    showGitHubLogin = true
+                } label: {
+                    Label("开始自动登录", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedGitHubAccountID == nil
+                          || workspaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("在窗口内自动完成 GitHub 登录并捕获 opencode auth Cookie")
+            }
+
+            if let loginMessage {
+                Label(loginMessage, systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
+
+            Text("需要所选账号的密码;若开启两步验证,请先在该账号中保存 TOTP 密钥")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
