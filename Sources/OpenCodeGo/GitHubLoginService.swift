@@ -191,7 +191,9 @@ struct GitHubLoginService {
                 case .fillingCredentials, .twoFactor:
                     // 提交后仍回到登录页:先探测内联 2FA 输入框(GitHub 会在登录页内
                     // 直接渲染 #otp,路径仍是 /login 或 /sessions)——命中 → 自动填码提交;
-                    // 未命中(无内联 2FA)→ 登录未成功,转手动避免死循环
+                    // 未命中且无可用验证码(如一次性码已过期)→ 转手动避免死循环,
+                    // 提示在窗口中输入当前两步验证码(原文案「登录未成功」会让人误以为
+                    // 要重头手动登录,而一次性码过期时用户唯一要做的只是补当前码)
                     if let totpCode, !totpCode.isEmpty {
                         return GitHubLoginDecision(
                             step: .twoFactor,
@@ -200,7 +202,7 @@ struct GitHubLoginService {
                             isOTPProbe: true)
                     }
                     return GitHubLoginDecision(
-                        step: .needsManualIntervention("GitHub 登录未成功,请在窗口中手动登录"),
+                        step: .needsManualIntervention("请在窗口中输入当前两步验证码,完成后等待自动捕获"),
                         javascript: nil, pollCookie: false)
                 case .idle, .loadingLoginPage, .githubLoginForm:
                     return GitHubLoginDecision(
@@ -239,6 +241,15 @@ struct GitHubLoginService {
             return GitHubLoginDecision(step: .loadingLoginPage, javascript: nil, pollCookie: false)
         }
         return GitHubLoginDecision(step: state, javascript: nil, pollCookie: false)
+    }
+
+    // MARK: - 一次性验证码过期判定
+
+    /// 一次性验证码有效期:GitHub 30s 轮换,网络/输入延迟下宽限到 90s;
+    /// 无记录时间视为已过期(GitHub 一次性码无法离线验证,超窗即无效)。
+    static func isOneTimeCodeExpired(since: Date?, now: Date) -> Bool {
+        guard let since else { return true }
+        return now.timeIntervalSince(since) > 90
     }
 
     // MARK: - Cookie 提取

@@ -51,6 +51,8 @@ struct GitHubLoginView: View {
     @State private var flowLog = GitHubLoginService.LoginFlowLog()
     /// 时间线已写入日志(避免同一流程重复输出,onDisappear 幂等兜底)
     @State private var flowLogDumped = false
+    /// 一次性码过期已打点(同一流程只记一次,避免每次决策重复刷时间线)
+    @State private var oneTimeCodeExpiryReported = false
     /// 是否已到达 GitHub OAuth:opencode.ai 对**任何匿名访问**都会下发 auth=Fe26.
     /// 开头的占位 cookie,未经过 GitHub 就把 Fe26. 判定为登录成功会捕获占位 → 虚假成功。
     /// 门槛:导航曾到达 github.com(含子域,登录/OAuth 授权/2FA 页)才允许采信 auth cookie
@@ -195,6 +197,7 @@ struct GitHubLoginView: View {
     private func start() {
         flowLog.log("flow start")
         flowLogDumped = false
+        oneTimeCodeExpiryReported = false
         fetchCredentials()
         let navigator = LoginNavigator { url in
             Task { @MainActor in
@@ -218,6 +221,9 @@ struct GitHubLoginView: View {
         case .totpSecret:
             totpSecret = githubStore.credential(for: account)
         case .oneTimeCode:
+            // 一次性码仅在导入/生成时保存过一次;是否过期以 account.lastCodeAt
+            // (导入时刻)为判定起点,见 GitHubLoginService.isOneTimeCodeExpired
+            // (GitHub 30s 轮换 + 90s 宽限),由 totpCodeNow 把关决定是否还自动填入
             oneTimeCode = githubStore.credential(for: account)
         case nil:
             break
@@ -417,9 +423,22 @@ struct GitHubLoginView: View {
         isWaitingFormRender = false
     }
 
-    /// 每次决策时取当前可用验证码:TOTP 每次现算(30s 滚动),一次性码用已保存值
+    /// 每次决策时取当前可用验证码:TOTP 每次现算(30s 滚动);一次性码用已保存值,
+    /// 但先经 isOneTimeCodeExpired(since: account.lastCodeAt)判定过期——GitHub
+    /// 一次性码 30s 轮换、超窗即失效,导入时刻的旧码早已作废:若仍返回会被 GitHub
+    /// 拒绝,并误导为「登录未成功」。已过期 → 不返回(走无码分支:2FA 页提示手输码、
+    /// 登录页内联 OTP 也不注入旧码),由用户在窗口中输入当前码。
     private func totpCodeNow() -> String? {
-        if let oneTimeCode { return oneTimeCode }
+        if let oneTimeCode {
+            if GitHubLoginService.isOneTimeCodeExpired(since: account.lastCodeAt, now: Date()) {
+                if !oneTimeCodeExpiryReported {
+                    flowLog.log("onetime-code 已过期(不再自动填入)")
+                    oneTimeCodeExpiryReported = true
+                }
+                return nil
+            }
+            return oneTimeCode
+        }
         if let secret = totpSecret {
             return TOTPGenerator.generate(secretBase32: secret)
         }
