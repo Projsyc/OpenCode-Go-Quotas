@@ -29,15 +29,26 @@ enum GitHubImportParser {
 
     /// 解析粘贴文本;遇到第一处无效行即抛错(带行号)
     static func parse(_ text: String) throws -> [GitHubImportRow] {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = splitLines(text)
         var rows: [GitHubImportRow] = []
         for (index, raw) in lines.enumerated() {
-            if let row = try parseRow(String(raw), lineNumber: index + 1) {
+            if let row = try parseRow(raw, lineNumber: index + 1) {
                 rows.append(row)
             }
         }
         guard !rows.isEmpty else { throw GitHubParseError.emptyInput }
         return rows
+    }
+
+    /// 行拆分(CRLF 兼容):CRLF / 单独 CR / LF 统一归一化为 \n 后按行切分。
+    /// ⚠️ 不能用 `String.split(separator: "\n")`:CR+LF 在 Unicode 字素簇
+    /// (TR29 GB3)中是单一簇,`"\n"` 不是独立 Character —— CRLF 文本整段不
+    /// 切分,Excel/Windows 导出的整份 CSV 会被当成一行,首行即报列数过多。
+    /// 空行保留(与 omittingEmptySubsequences: false 语义一致,行号不漂移)。
+    static func splitLines(_ text: String) -> [String] {
+        text.components(separatedBy: "\r\n").joined(separator: "\n")
+            .components(separatedBy: "\r").joined(separator: "\n")
+            .components(separatedBy: "\n")
     }
 
     /// 逐行解析入口:空行 / `#` 注释行返回 nil(跳过);无效行抛带行号的错误;

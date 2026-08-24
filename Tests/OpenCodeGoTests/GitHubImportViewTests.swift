@@ -59,6 +59,17 @@ final class GitHubImportViewTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty)
     }
 
+    /// ghaudit:预览路径同样走 splitLines —— CRLF(Excel/Windows 导出)不再整段不切分
+    func testPreviewCRLFLines() throws {
+        let rows = GitHubImportView.previewRows(from: "user1, pass123, GEZDGNBVGY3TQOJQ\r\nuser2, pass456, 123456\r\n")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertNil(rows[0].error)
+        XCTAssertEqual(rows[0].username, "user1")
+        XCTAssertEqual(rows[0].kind, .totpSecret)
+        XCTAssertNil(rows[1].error)
+        XCTAssertEqual(rows[1].kind, .oneTimeCode)
+    }
+
     func testCredentialKindSharedInference() {
         // S1:原 GitHubEditView.inferKind 已收敛为 GitHubCredentialKind.kind(for:) 共享函数
         XCTAssertEqual(GitHubCredentialKind.kind(for: "123456"), .oneTimeCode)
