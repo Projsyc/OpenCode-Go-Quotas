@@ -60,6 +60,24 @@ final class GitHubAccountStore {
         } else {
             self.keychain = keychain ?? KeychainHelper(service: "com.acccan.opencode-go.github")
             load()
+            // 一次性把既有凭据项迁移为「仅本 app 免提示访问」ACL(后台执行,不阻塞 UI)
+            scheduleSelfAccessMigration()
+        }
+    }
+
+    /// 把既有 GitHub 凭据项(密码/TOTP secret/一次性码)迁移为「仅本 app 免提示访问」
+    /// ACL,消除授权弹窗。仅真实 KeychainHelper 时执行(测试注入 mock / demo 内存
+    /// Keychain 天然跳过);后台异步,失败由 KeychainHelper 记日志并在下次启动重试。
+    private func scheduleSelfAccessMigration() {
+        guard let helper = keychain as? KeychainHelper else { return }
+        var keys: [String] = []
+        for account in accounts {
+            keys.append(key("password", account.id))
+            keys.append(key("credential", account.id))
+        }
+        let service = helper.service
+        Task.detached(priority: .utility) {
+            KeychainHelper.runSelfAccessMigration(service: service, keys: keys)
         }
     }
 

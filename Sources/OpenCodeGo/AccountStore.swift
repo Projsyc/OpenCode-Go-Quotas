@@ -32,6 +32,20 @@ final class AccountStore {
             demoMode = true
             loadDemo()
         }
+        // 一次性把既有 Cookie 项迁移为「仅本 app 免提示访问」ACL(后台执行,不阻塞 UI)
+        scheduleSelfAccessMigration()
+    }
+
+    /// 把既有 Keychain 项(auth Cookie)迁移为「仅本 app 免提示访问」ACL,消除每次
+    /// 刷新读取 Cookie 的授权弹窗。仅使用真实 KeychainHelper(非测试注入 mock)且非
+    /// demo 模式时执行;后台异步,失败由 KeychainHelper 记日志并在下次启动重试。
+    private func scheduleSelfAccessMigration() {
+        guard !demoMode, let helper = keychain as? KeychainHelper else { return }
+        let keys = accounts.map { $0.id.uuidString }
+        let service = helper.service
+        Task.detached(priority: .utility) {
+            KeychainHelper.runSelfAccessMigration(service: service, keys: keys)
+        }
     }
 
     private static func defaultFileURL() -> URL {
