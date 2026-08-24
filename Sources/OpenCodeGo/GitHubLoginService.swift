@@ -263,6 +263,28 @@ struct GitHubLoginService {
         return domain == "opencode.ai" || domain.hasSuffix(".opencode.ai")
     }
 
+    // MARK: - Workspace ID 识别(登录成功后回传)
+
+    /// 从 URL path 提取 workspaceId:/workspace/{ws} → ws;其余路径 → nil。
+    /// 判定:opencode 域(含子域)+ 路径前缀 /workspace/ + 剩余段非空且
+    /// `QuotaClient.validateWorkspaceId` 通过(形如 wrk_xxx)。
+    /// 用于「Workspace ID 留空登录」场景:登录成功后 opencode 前端跳回工作区页,
+    /// 由当前 URL 反查 ws 回填表单 / 自动保存;识别不到时父视图提示手动填写。
+    /// 纯函数,无副作用,可单测。
+    static func workspaceId(from url: URL?) -> String? {
+        guard let url else { return nil }
+        let host = url.host?.lowercased() ?? ""
+        guard host == "opencode.ai" || host.hasSuffix(".opencode.ai") else { return nil }
+        let prefix = "/workspace/"
+        let path = url.path
+        guard path.hasPrefix(prefix) else { return nil }
+        // URL.path 已做百分号解码;容忍 SPA 跳转可能产生的尾部斜杠 /workspace/wrk_xxx/
+        let raw = String(path.dropFirst(prefix.count))
+        let segment = raw.hasSuffix("/") ? String(raw.dropLast()) : raw
+        guard QuotaClient.validateWorkspaceId(segment) == nil else { return nil }
+        return segment
+    }
+
     // MARK: - JS 片段构造(值一律经 jsonEscaped,绝不字符串拼接注入)
 
     /// 填 GitHub 登录表单并提交;返回值为状态机提供确认信号:
