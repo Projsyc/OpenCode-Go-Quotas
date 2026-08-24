@@ -9,22 +9,34 @@ final class AccountStore {
     /// 演示模式(启动参数 --demo):注入假数据,不发起真实请求
     private(set) var demoMode = false
 
-    private let keychain: KeychainHelper
+    private let keychain: KeychainStoring
     private let client: QuotaClient
     private let fileURL: URL
 
-    init(client: QuotaClient = QuotaClient()) {
+    /// - Parameters:
+    ///   - client: 额度客户端(默认 .shared)
+    ///   - keychain: nil → KeychainHelper(service: "com.acccan.opencode-go")
+    ///   - fileURL: nil → Application Support/OpenCodeGo/accounts.json
+    init(
+        client: QuotaClient = QuotaClient(),
+        keychain: KeychainStoring? = nil,
+        fileURL: URL? = nil
+    ) {
         self.client = client
-        self.keychain = KeychainHelper(service: "com.acccan.opencode-go")
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        self.fileURL = support
-            .appendingPathComponent("OpenCodeGo", isDirectory: true)
-            .appendingPathComponent("accounts.json")
+        self.keychain = keychain ?? KeychainHelper(service: "com.acccan.opencode-go")
+        self.fileURL = fileURL ?? Self.defaultFileURL()
         load()
         if ProcessInfo.processInfo.arguments.contains("--demo") {
             demoMode = true
             loadDemo()
         }
+    }
+
+    private static func defaultFileURL() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return support
+            .appendingPathComponent("OpenCodeGo", isDirectory: true)
+            .appendingPathComponent("accounts.json")
     }
 
     // MARK: - 持久化
@@ -132,11 +144,48 @@ final class AccountStore {
             return
         }
         do {
-            accounts[i].history = try await client.fetchGoUsageHistory(
-                workspaceId: account.workspaceId, authCookie: cookie)
+            accounts[i].history = try await Self.fetchAllHistoryPages(
+                client: client, workspaceId: account.workspaceId, authCookie: cookie)
         } catch {
             accounts[i].historyError = error.localizedDescription
         }
+    }
+
+    /// 分页拉取全部用量历史(服务端每页返回定长窗口,cursor 为页码索引):
+    /// 逐页递增 cursor,直到满足任一终止条件 ——
+    /// 1. 某页解析出的记录数 < 单页窗口(以首页实际解析条数为准)→ 已到底;
+    /// 2. 解析抛错(空页会抛 QuotaError.parseFailed)→ 视为已到底;
+    /// 3. 达到页数上限 maxPages,防止失控。
+    /// 各页合并后按 id 去重,再按 timeCreated 降序排列。
+    /// 其余真实失败(认证失败/会话过期/HTTP 错误)原样上抛,由调用方置 historyError。
+    static func fetchAllHistoryPages(
+        client: QuotaClient,
+        workspaceId: String,
+        authCookie: String,
+        maxPages: Int = 20
+    ) async throws -> [UsageHistoryItem] {
+        var all: [UsageHistoryItem] = []
+        var windowSize: Int?
+        for cursor in 0..<maxPages {
+            let page: [UsageHistoryItem]
+            do {
+                page = try await client.fetchGoUsageHistory(
+                    workspaceId: workspaceId, authCookie: authCookie, cursor: cursor)
+            } catch let error as QuotaError {
+                // 空页以 parseFailed 上抛 → 已到底;其余真实失败上抛
+                guard case .parseFailed = error else { throw error }
+                break
+            }
+            all.append(contentsOf: page)
+            if let windowSize {
+                if page.count < windowSize { break } // 短页(< 单页窗口)→ 已到底,该页并入结果
+            } else {
+                windowSize = page.count // 首页条数即单页窗口(以实际解析条数为准)
+            }
+        }
+        var seen = Set<String>()
+        let deduped = all.filter { seen.insert($0.id).inserted }
+        return deduped.sorted { $0.timeCreated > $1.timeCreated }
     }
 
     // MARK: - 演示数据(仅 --demo 模式)
