@@ -10,6 +10,7 @@ struct GitHubImportView: View {
     @State private var preview: [GitHubImportPreviewRow] = []
     @State private var showingFileImporter = false
     @State private var outcome: ImportOutcome?
+    @State private var loadError: String?
 
     /// 批量导入结果:部分成功(停留展示)或全部失败(错误提示)
     enum ImportOutcome {
@@ -32,6 +33,7 @@ struct GitHubImportView: View {
             formatHint
             editor
             actionRow
+            loadErrorView
             if !preview.isEmpty {
                 previewList
             } else if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -114,6 +116,16 @@ struct GitHubImportView: View {
                 Label("解析预览", systemImage: "text.magnifyingglass")
             }
             .buttonStyle(.bordered)
+        }
+    }
+
+    /// 文件读取/解码失败提示(与逐行解析错误区分:整文件级问题,无行号)
+    @ViewBuilder
+    private var loadErrorView: some View {
+        if let loadError {
+            Label(loadError, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
         }
     }
 
@@ -227,6 +239,7 @@ struct GitHubImportView: View {
     private func refreshPreview() {
         preview = Self.previewRows(from: text)
         outcome = nil
+        loadError = nil
     }
 
     private func importAll() {
@@ -251,11 +264,18 @@ struct GitHubImportView: View {
         case .success(let url):
             let didStart = url.startAccessingSecurityScopedResource()
             defer { if didStart { url.stopAccessingSecurityScopedResource() } }
-            guard let data = try? Data(contentsOf: url),
-                  let chunk = String(data: data, encoding: .utf8)
-            else { return }
+            guard let data = try? Data(contentsOf: url) else {
+                loadError = "文件无法读取,请确认是 UTF-8 编码的 TXT/CSV"
+                return
+            }
+            // 与 parseCSV 共用解码路径(剥 BOM + UTF-8 校验);失败给出可见提示,不再静默 return
+            guard let chunk = GitHubImportParser.decodeUTF8Text(data) else {
+                loadError = "文件无法读取,请确认是 UTF-8 编码的 TXT/CSV"
+                return
+            }
             let trimmed = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
+            loadError = nil
             text = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? trimmed
                 : text + "\n" + trimmed

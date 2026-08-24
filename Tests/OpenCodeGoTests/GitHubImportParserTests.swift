@@ -164,6 +164,28 @@ final class GitHubImportParserTests: XCTestCase {
         }
     }
 
+    /// M2:CSV 文件导入剥离 UTF-8 前缀 BOM(U+FEFF),避免首行用户名入库为 "\u{FEFF}user1"
+    func testParseCSVStripsBOM() throws {
+        let data = Data("\u{FEFF}user1,pass1234,GEZDGNBVGY3TQOJQ\nuser2,pass5678,123456".utf8)
+        let rows = try GitHubImportParser.parseCSV(data: data)
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].username, "user1")
+        XCTAssertFalse(rows[0].username.hasPrefix("\u{FEFF}"))
+        XCTAssertEqual(rows[1].username, "user2")
+        XCTAssertEqual(rows[1].kind, .oneTimeCode)
+        // 仅 BOM + 空白 → 剥离后无内容,按空输入处理
+        XCTAssertThrowsError(try GitHubImportParser.parseCSV(data: Data("\u{FEFF}\n  ".utf8))) { error in
+            XCTAssertEqual(error as? GitHubParseError, .emptyInput)
+        }
+    }
+
+    /// M2:decodeUTF8Text 共用解码入口(parseCSV 与视图 loadFile 同路径)
+    func testDecodeUTF8TextStripsBOM() {
+        XCTAssertEqual(GitHubImportParser.decodeUTF8Text(Data("\u{FEFF}abc".utf8)), "abc")
+        XCTAssertEqual(GitHubImportParser.decodeUTF8Text(Data("abc".utf8)), "abc")
+        XCTAssertNil(GitHubImportParser.decodeUTF8Text(Data([0xff, 0xfe, 0x00, 0x41])))
+    }
+
     func testLineNumbersWithCommentsAndBlanks() throws {
         let text = "# 表头\n\nuser1,pass1234,GEZDGNBVGY3TQOJQ\n   \nuser2,pass5678"
         let rows = try GitHubImportParser.parse(text)

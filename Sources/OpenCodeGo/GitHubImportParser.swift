@@ -95,10 +95,21 @@ enum GitHubImportParser {
 
     /// 解析 CSV 文件数据(假定 UTF-8;编码无效按第 1 行报错)
     static func parseCSV(data: Data) throws -> [GitHubImportRow] {
-        guard let text = String(data: data, encoding: .utf8) else {
+        guard let text = decodeUTF8Text(data) else {
             throw GitHubParseError.invalidRow(line: 1, reason: "文件不是有效的 UTF-8 文本")
         }
         return try parse(text)
+    }
+
+    /// 解码 UTF-8 文本并剥离文件开头的前缀 BOM(U+FEFF);非 UTF-8 返回 nil。
+    /// parseCSV 与视图 loadFile 共用此解码路径,避免 BOM 混入首行用户名
+    /// 导致自动登录静默失败。
+    static func decodeUTF8Text(_ data: Data) -> String? {
+        guard var text = String(data: data, encoding: .utf8) else { return nil }
+        if text.hasPrefix("\u{FEFF}") {
+            text.removeFirst()
+        }
+        return text
     }
 
     // MARK: - 私有
