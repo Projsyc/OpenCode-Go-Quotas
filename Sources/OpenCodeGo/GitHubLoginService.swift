@@ -22,6 +22,21 @@ struct GitHubLoginDecision: Equatable {
     let step: GitHubLoginStep
     let javascript: String?
     let pollCookie: Bool
+    /// 是否为内联 2FA 探测注入(凭据已提交后对 github.com 任意页面追加):
+    /// 结果由视图解释——命中填码提交,未命中按现有规则继续(登录页未命中 → 转手动)
+    let isOTPProbe: Bool
+
+    init(
+        step: GitHubLoginStep,
+        javascript: String?,
+        pollCookie: Bool,
+        isOTPProbe: Bool = false
+    ) {
+        self.step = step
+        self.javascript = javascript
+        self.pollCookie = pollCookie
+        self.isOTPProbe = isOTPProbe
+    }
 }
 
 /// GitHub 自动登录服务:URL → 决策的纯函数状态机 + JS 片段构造 + cookie 提取。
@@ -49,10 +64,14 @@ struct GitHubLoginService {
     /// 1. GitHub 2FA 页(路径含 two-factor)→ 有码自动填,无码手动;
     /// 2. GitHub 通行密钥(webauthn)/设备验证(device)→ 手动;
     /// 3. GitHub OAuth 授权页(oauth/authorize)→ 注入点击授权按钮的 JS;
-    /// 4. GitHub 登录表单(/login、/sessions)→ 注入用户名/密码并提交;
-    ///    若已提交过(状态为 fillingCredentials/twoFactor)又回到登录页 = 登录失败 → 手动;
-    /// 5. opencode 域(含子域)→ 轮询 cookie + 注入读 cookie / 点击 GitHub 登录入口的 JS;
-    /// 6. 其他域(风控/验证码页等)→ 按当前状态延续,不打断。
+    /// 4. GitHub 登录表单(/login、/sessions)→ 注入用户名/密码并提交(确认成功后才推进状态);
+    ///    若已提交过(状态为 fillingCredentials/twoFactor)又回到登录页:先探测内联 2FA
+    ///    输入框(登录页内直接渲染 #otp 的形态,路径仍是 /login)——命中 → 自动填码提交,
+    ///    未命中且无 two-factor 路径 → 登录失败 → 手动;
+    /// 5. 其他 GitHub 页面(资料页、安全页等)→ 按当前状态延续;凭据已提交后追加一次
+    ///    内联 OTP 探测(不依赖 URL 路径),命中 → 自动填码,未命中 → 按现有规则继续;
+    /// 6. opencode 域(含子域)→ 轮询 cookie + 注入读 cookie / 点击 GitHub 登录入口的 JS;
+    /// 7. 其他域(风控/验证码页等)→ 按当前状态延续,不打断。
     static func decide(
         for url: URL?,
         githubUsername: String,
@@ -102,7 +121,16 @@ struct GitHubLoginService {
             if path.contains("/login") || path.contains("/session") {
                 switch state {
                 case .fillingCredentials, .twoFactor:
-                    // 提交后仍回到登录页 = 账号或密码错误,避免死循环,转手动
+                    // 提交后仍回到登录页:先探测内联 2FA 输入框(GitHub 会在登录页内
+                    // 直接渲染 #otp,路径仍是 /login 或 /sessions)——命中 → 自动填码提交;
+                    // 未命中(无内联 2FA)→ 登录未成功,转手动避免死循环
+                    if let totpCode, !totpCode.isEmpty {
+                        return GitHubLoginDecision(
+                            step: .twoFactor,
+                            javascript: probeAndFillOTPJS(code: totpCode),
+                            pollCookie: false,
+                            isOTPProbe: true)
+                    }
                     return GitHubLoginDecision(
                         step: .needsManualIntervention("GitHub 登录未成功,请在窗口中手动登录"),
                         javascript: nil, pollCookie: false)
@@ -116,7 +144,17 @@ struct GitHubLoginService {
                     return GitHubLoginDecision(step: state, javascript: nil, pollCookie: false)
                 }
             }
-            // 5) 其他 GitHub 页面(资料页、安全页等):按当前状态延续
+            // 5) 其他 GitHub 页面(资料页、安全页等):按当前状态延续;
+            //    凭据已提交后(等内联 2FA)追加一次 OTP 探测,不依赖 URL 路径:
+            //    命中 → 自动填码提交,未命中由视图按现有规则继续
+            if (state == .fillingCredentials || state == .twoFactor),
+               let totpCode, !totpCode.isEmpty {
+                return GitHubLoginDecision(
+                    step: state,
+                    javascript: probeAndFillOTPJS(code: totpCode),
+                    pollCookie: false,
+                    isOTPProbe: true)
+            }
             return GitHubLoginDecision(step: state, javascript: nil, pollCookie: false)
         }
 
@@ -153,7 +191,10 @@ struct GitHubLoginService {
 
     // MARK: - JS 片段构造(值一律经 jsonEscaped,绝不字符串拼接注入)
 
-    /// 填 GitHub 登录表单(#login_field / #password)并提交;找不到表单时返回标记字符串
+    /// 填 GitHub 登录表单(#login_field / #password)并提交;返回值为状态机提供确认信号:
+    /// - `filled`:本次注入填入并提交;
+    /// - `already-filled`:填入前值已一致(幂等,重试/自动填充场景),视为成功;
+    /// - `no-form` / `no-login-field`:表单未就绪,由视图重试。
     static func fillCredentialsJS(username: String, password: String) -> String {
         let user = jsonEscaped(username)
         let pass = jsonEscaped(password)
@@ -164,11 +205,15 @@ struct GitHubLoginService {
           var u = document.getElementById('login_field');
           var p = document.getElementById('password');
           if (u && p) {
+            var already = u.value === user && p.value === pass;
             u.value = user; p.value = pass;
             u.dispatchEvent(new Event('input', {bubbles:true}));
             p.dispatchEvent(new Event('input', {bubbles:true}));
             var form = u.closest('form') || p.closest('form') || document.querySelector('form');
-            if (form) { form.submit(); return 'submitted'; }
+            if (form) {
+              if (already) { return 'already-filled'; }
+              form.submit(); return 'filled';
+            }
             return 'no-form';
           }
           return 'no-login-field';
@@ -204,6 +249,26 @@ struct GitHubLoginService {
         """
     }
 
+    /// 探测内联 2FA 输入框并填码提交(GitHub 登录页内直接渲染 #otp 的形态,路径仍是
+    /// /login 或 /sessions):命中 `#otp` / `input[name="otp"]` / `input[autocomplete="one-time-code"]`
+    /// 任一选择器 → 填码并提交,返回 `otp-filled`;未命中返回 `no-otp`(视图按现有规则继续/转手动)
+    static func probeAndFillOTPJS(code: String) -> String {
+        let value = jsonEscaped(code)
+        return """
+        (function() {
+          var otp = document.getElementById('otp')
+            || document.querySelector('input[name="otp"]')
+            || document.querySelector('input[autocomplete="one-time-code"]');
+          if (!otp) { return 'no-otp'; }
+          otp.value = \(value);
+          otp.dispatchEvent(new Event('input', {bubbles:true}));
+          var form = otp.closest('form') || document.querySelector('form');
+          if (form) { form.submit(); return 'otp-filled'; }
+          return 'no-form';
+        })();
+        """
+    }
+
     /// 读 document.cookie 中的 auth cookie;未登录且页面有 GitHub 登录入口时点击它(触发 OAuth,仅一次)
     static func readCookiesJS() -> String {
         """
@@ -232,5 +297,44 @@ struct GitHubLoginService {
               array.count >= 2
         else { return "\"\"" }
         return String(array.dropFirst().dropLast())
+    }
+
+    // MARK: - 注入结果分类(JS 返回值 → 状态机动作)与重试参数
+
+    /// 凭据表单注入结果分类
+    enum CredentialInjectResult: Equatable {
+        /// filled / already-filled:已填并提交(或幂等已填,视为成功)→ 推进状态机
+        case success
+        /// no-login-field / no-form / 未知 / JS 错误:表单未渲染或注入异常 → 稍后重试
+        case retry
+    }
+
+    /// 内联 2FA 探测结果分类
+    enum OTPProbeResult: Equatable {
+        /// otp-filled:已填码并提交 → 进入等待 2FA 结果
+        case filled
+        /// no-otp / no-form / 未知 / JS 错误:页面无 OTP 输入框 → 按现有规则继续
+        case notPresent
+    }
+
+    /// 凭据表单注入:首次注入后的重试次数上限(总注入 = 1 + 该值)
+    static let credentialInjectMaxRetries = 5
+    /// 凭据表单注入重试间隔(毫秒)
+    static let credentialInjectRetryDelayMs = 500
+
+    static func classifyCredentialInjectResult(_ jsResult: String?) -> CredentialInjectResult {
+        switch jsResult {
+        case "filled", "already-filled": return .success
+        case "no-login-field", "no-form": return .retry
+        case .none: return .retry   // JS 执行失败(导航中断等):按未渲染保守重试
+        default: return .retry      // 未知返回值:保守重试
+        }
+    }
+
+    static func classifyOTPProbeResult(_ jsResult: String?) -> OTPProbeResult {
+        switch jsResult {
+        case "otp-filled": return .filled
+        default: return .notPresent
+        }
     }
 }
