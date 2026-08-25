@@ -31,6 +31,7 @@ swift "$ROOT/tools/render-dmg-background.swift"
 
 echo "==> 4/5 组装 staging + DS_Store 布局"
 STAGE="$HOME/Library/Caches/ocg-dmg-new"
+rm -rf "$STAGE"
 mkdir -p "$STAGE/.background"
 cp -R "$DIST" "$STAGE/"
 cp /tmp/dmg-background.png "$STAGE/.background/background.png"
