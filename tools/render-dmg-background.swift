@@ -1,6 +1,10 @@
 import AppKit
 
 // ===== OpenCode-Go-Quotas dmg 背景(600×400)=====
+// 设计:深靛紫基底 + 品牌三色光斑(蓝/玫红/薄荷)+ 大仪表环弧线(呼应图标三环意象)
+// + 星芒点缀 + 极简标题与安装提示。图标区留白,不画假图标——真实 Finder 图标直接
+// 落在干净的背景上(DS_Store 摆位于 (150,130)/(390,130))。
+
 let W: CGFloat = 600, H: CGFloat = 400
 guard let rep = NSBitmapImageRep(
     bitmapDataPlanes: nil, pixelsWide: Int(W), pixelsHigh: Int(H),
@@ -11,79 +15,110 @@ let ctx = NSGraphicsContext(bitmapImageRep: rep)!
 NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = ctx
 
-// 背景:深紫渐变(与 icon 一致)
-let bgRect = NSRect(x: 0, y: 0, width: W, height: H)
-NSGradient(colors: [
-    NSColor(calibratedRed: 0.24, green: 0.09, blue: 0.58, alpha: 1.0),
-    NSColor(calibratedRed: 0.42, green: 0.16, blue: 0.86, alpha: 1.0),
-])!.draw(in: bgRect, angle: -55)
+func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
+    NSColor(calibratedRed: CGFloat((hex >> 16) & 0xFF) / 255,
+            green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255, alpha: alpha)
+}
+func rounded(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
+    let d = NSFont.systemFont(ofSize: size, weight: weight).fontDescriptor.withDesign(.rounded)!
+    return NSFont(descriptor: d, size: size)!
+}
 
-// 顶部柔光带
-NSColor(white: 1.0, alpha: 0.04).setFill()
-NSBezierPath(roundedRect: NSRect(x: 0, y: H - 88, width: W, height: 88),
-             xRadius: 0, yRadius: 0).fill()
+// 1. 基底:深靛紫渐变(上暗下亮,带一点对角光照)
+NSGradient(colors: [color(0x1C0E3E), color(0x35177F), color(0x5226C4)])!
+    .draw(in: NSRect(x: 0, y: 0, width: W, height: H), angle: -90)
 
-// 标题
-let title = "OpenCode Go" as NSString
+// 2. 品牌光斑(径向渐变,呼应主题 accent:蓝/玫红/薄荷)
+func glow(_ hex: UInt32, _ alpha: CGFloat, _ cx: CGFloat, _ cy: CGFloat, _ r: CGFloat) {
+    guard let g = NSGradient(colorsAndLocations: (color(hex, alpha), 0.0), (color(hex, 0.0), 1.0)) else { return }
+    g.draw(fromCenter: NSPoint(x: cx, y: cy), radius: 0,
+           toCenter: NSPoint(x: cx, y: cy), radius: r, options: [])
+}
+glow(0x5B8DEF, 0.34, 80, 390, 250)     // 蓝 · 左上
+glow(0xEC6EAD, 0.26, 560, 40, 260)     // 玫红 · 右下
+glow(0x34D399, 0.18, 500, 350, 170)    // 薄荷 · 右上点缀
+
+// 3. 大仪表环弧线:一道贯穿底部的弧,呼应额度仪表环
+func arc(_ c: NSPoint, _ r: CGFloat, _ a0: CGFloat, _ a1: CGFloat, _ w: CGFloat) -> NSBezierPath {
+    let p = NSBezierPath()
+    p.appendArc(withCenter: c, radius: r, startAngle: a0, endAngle: a1, clockwise: false)
+    p.lineWidth = w
+    p.lineCapStyle = .round
+    return p
+}
+let ringC = NSPoint(x: 300, y: -260)
+NSColor.white.withAlphaComponent(0.05).setStroke()
+arc(ringC, 478, 66, 114, 9).stroke()
+NSColor.white.withAlphaComponent(0.08).setStroke()
+arc(ringC, 450, 58, 122, 16).stroke()
+NSColor(calibratedRed: 0.20, green: 0.87, blue: 0.58, alpha: 0.18).setStroke()
+arc(ringC, 450, 62, 86, 16).stroke()
+
+// 4. 星芒点缀(4 角星)
+func sparkle(_ cx: CGFloat, _ cy: CGFloat, _ r: CGFloat, _ alpha: CGFloat) {
+    let p = NSBezierPath()
+    p.move(to: NSPoint(x: cx, y: cy + r))
+    p.curve(to: NSPoint(x: cx + r, y: cy),
+            controlPoint1: NSPoint(x: cx + r * 0.16, y: cy + r * 0.16),
+            controlPoint2: NSPoint(x: cx + r * 0.16, y: cy + r * 0.16))
+    p.curve(to: NSPoint(x: cx, y: cy - r),
+            controlPoint1: NSPoint(x: cx + r * 0.16, y: cy - r * 0.16),
+            controlPoint2: NSPoint(x: cx + r * 0.16, y: cy - r * 0.16))
+    p.curve(to: NSPoint(x: cx - r, y: cy),
+            controlPoint1: NSPoint(x: cx - r * 0.16, y: cy - r * 0.16),
+            controlPoint2: NSPoint(x: cx - r * 0.16, y: cy - r * 0.16))
+    p.curve(to: NSPoint(x: cx, y: cy + r),
+            controlPoint1: NSPoint(x: cx - r * 0.16, y: cy + r * 0.16),
+            controlPoint2: NSPoint(x: cx - r * 0.16, y: cy + r * 0.16))
+    NSColor.white.withAlphaComponent(alpha).setFill()
+    p.fill()
+}
+sparkle(70, 320, 12, 0.30)
+sparkle(130, 258, 6, 0.22)
+sparkle(556, 300, 9, 0.26)
+sparkle(520, 236, 5, 0.20)
+
+// 5. 标题(带投影)+ 副标(字距放宽)
+let titleSH = NSShadow()
+titleSH.shadowColor = NSColor.black.withAlphaComponent(0.38)
+titleSH.shadowBlurRadius = 16
+titleSH.shadowOffset = NSSize(width: 0, height: -2)
+
+let title = "OpenCode-Go-Quotas" as NSString
 let titleAttrs: [NSAttributedString.Key: Any] = [
-    .font: NSFont.systemFont(ofSize: 44, weight: .bold),
+    .font: rounded(28, .semibold),
     .foregroundColor: NSColor.white,
+    .kern: 0.8,
+    .shadow: titleSH,
 ]
 let titleSize = title.size(withAttributes: titleAttrs)
-title.draw(at: NSPoint(x: (W - titleSize.width) / 2, y: H - 96), withAttributes: titleAttrs)
+title.draw(at: NSPoint(x: (W - titleSize.width) / 2, y: H - 66), withAttributes: titleAttrs)
 
-// 副标题
 let sub = "多账号额度查询 · GitHub 登录管理" as NSString
 let subAttrs: [NSAttributedString.Key: Any] = [
-    .font: NSFont.systemFont(ofSize: 17, weight: .regular),
-    .foregroundColor: NSColor.white.withAlphaComponent(0.72),
+    .font: rounded(13, .regular),
+    .foregroundColor: NSColor.white.withAlphaComponent(0.66),
+    .kern: 2.4,
 ]
 let subSize = sub.size(withAttributes: subAttrs)
-sub.draw(at: NSPoint(x: (W - subSize.width) / 2, y: H - 138), withAttributes: subAttrs)
+sub.draw(at: NSPoint(x: (W - subSize.width) / 2, y: H - 100), withAttributes: subAttrs)
 
-// 左侧 app 缩略图(白色圆角底 + App 图标风格小图)
-let appCard = NSBezierPath(roundedRect: NSRect(x: 92, y: 92, width: 120, height: 120), xRadius: 26, yRadius: 26)
-NSColor.white.withAlphaComponent(0.92).setFill()
-appCard.fill()
-// 卡片内迷你 icon:紫色圆角 + 三环
-let mini = NSBezierPath(roundedRect: NSRect(x: 104, y: 104, width: 96, height: 96), xRadius: 20, yRadius: 20)
-NSGradient(colors: [
-    NSColor(calibratedRed: 0.55, green: 0.24, blue: 0.98, alpha: 1.0),
-    NSColor(calibratedRed: 0.30, green: 0.11, blue: 0.72, alpha: 1.0),
-])!.draw(in: mini, angle: -40)
-let ring1 = NSBezierPath()
-ring1.appendArc(withCenter: NSPoint(x: 152, y: 168), radius: 26, startAngle: 90, endAngle: 350, clockwise: false)
-ring1.lineWidth = 9; ring1.lineCapStyle = .round
-NSColor(calibratedRed: 0.20, green: 0.87, blue: 0.58, alpha: 1.0).setStroke(); ring1.stroke()
-let ring2 = NSBezierPath()
-ring2.appendArc(withCenter: NSPoint(x: 130, y: 126), radius: 15, startAngle: 200, endAngle: 400, clockwise: false)
-ring2.lineWidth = 7; ring2.lineCapStyle = .round
-NSColor(calibratedRed: 1.00, green: 0.72, blue: 0.22, alpha: 1.0).setStroke(); ring2.stroke()
-
-// 右侧 Applications 图标(Finder 蓝文件夹风格)
-let folder = NSBezierPath(roundedRect: NSRect(x: 388, y: 106, width: 120, height: 92), xRadius: 18, yRadius: 18)
-NSColor(calibratedRed: 0.98, green: 0.99, blue: 1.0, alpha: 0.95).setFill()
-folder.fill()
-NSColor(calibratedRed: 0.80, green: 0.85, blue: 1.0, alpha: 1.0).setFill()
-NSBezierPath(roundedRect: NSRect(x: 388, y: 172, width: 120, height: 26), xRadius: 13, yRadius: 13).fill()
-NSColor(calibratedRed: 0.62, green: 0.70, blue: 0.95, alpha: 1.0).setFill()
-NSBezierPath(roundedRect: NSRect(x: 414, y: 62, width: 68, height: 44), xRadius: 10, yRadius: 10).fill()
-
-// 中间箭头 + 文字
-let arrow = "→" as NSString
-let arrowAttrs: [NSAttributedString.Key: Any] = [
-    .font: NSFont.systemFont(ofSize: 72, weight: .semibold),
-    .foregroundColor: NSColor.white.withAlphaComponent(0.85),
-]
-arrow.draw(at: NSPoint(x: 268, y: 118), withAttributes: arrowAttrs)
-
-let hint = "拖拽到 Applications 完成安装" as NSString
+// 6. 底部安装提示(细字距)
+let hint = "拖入 Applications 文件夹完成安装" as NSString
 let hintAttrs: [NSAttributedString.Key: Any] = [
-    .font: NSFont.systemFont(ofSize: 15, weight: .medium),
-    .foregroundColor: NSColor.white.withAlphaComponent(0.85),
+    .font: rounded(11, .medium),
+    .foregroundColor: NSColor.white.withAlphaComponent(0.58),
+    .kern: 1.6,
 ]
 let hintSize = hint.size(withAttributes: hintAttrs)
-hint.draw(at: NSPoint(x: (W - hintSize.width) / 2, y: 62), withAttributes: hintAttrs)
+hint.draw(at: NSPoint(x: (W - hintSize.width) / 2, y: 22), withAttributes: hintAttrs)
+
+// 7. 上下轻柔暗角(提升纵深)
+NSGradient(colors: [NSColor.black.withAlphaComponent(0.20), NSColor.black.withAlphaComponent(0.0)])!
+    .draw(in: NSRect(x: 0, y: H - 130, width: W, height: 130), angle: -90)
+NSGradient(colors: [NSColor.black.withAlphaComponent(0.16), NSColor.black.withAlphaComponent(0.0)])!
+    .draw(in: NSRect(x: 0, y: 0, width: W, height: 110), angle: 90)
 
 NSGraphicsContext.restoreGraphicsState()
 guard let data = rep.representation(using: .png, properties: [:]) else { fatalError() }
