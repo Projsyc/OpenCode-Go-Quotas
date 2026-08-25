@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 import CommonCrypto
 import CryptoKit
-@testable import OpenCodeGo
+@testable import OpenCode_Go_Quotas
 
 final class BrowserCookieServiceTests: XCTestCase {
 

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import OpenCodeGo
+@testable import OpenCode_Go_Quotas
 
 // MARK: - Mock URLProtocol
 

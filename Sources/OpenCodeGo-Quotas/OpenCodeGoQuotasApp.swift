@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct OpenCodeGoApp: App {
+struct OpenCodeGoQuotasApp: App {
     @State private var store = AccountStore()
 
     var body: some Scene {

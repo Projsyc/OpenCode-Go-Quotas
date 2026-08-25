@@ -1,9 +1,9 @@
-# OpenCodeGo — OpenCode Go 多账号额度查询 (macOS)
+# OpenCode-Go-Quotas — OpenCode Go 多账号额度查询 (macOS)
 
 把 [Ruinique/opencode-go-dashboard](https://github.com/Ruinique/opencode-go-dashboard) 改造成的原生 Swift 应用。
 现代化 SwiftUI 界面(SVG 装饰 + 渐变仪表环):每个账号展示 **Rolling / Weekly / Monthly** 三档用量与重置倒计时,附逐请求用量历史(今日 / 本周 / 本月 / 全部)。
 
-数据获取逻辑与原项目 **1:1 移植**(`Sources/OpenCodeGo/QuotaClient.swift` 对应原 `src/worker/quota.ts`):
+数据获取逻辑与原项目 **1:1 移植**(`Sources/OpenCodeGo-Quotas/QuotaClient.swift` 对应原 `src/worker/quota.ts`):
 - 额度:GET `https://opencode.ai/workspace/{ws}/go`,解析页面内嵌的 `rollingUsage/weeklyUsage/monthlyUsage/plan`
 - 历史:POST `https://opencode.ai/_server`(SolidStart RPC),按 `id:"usg_xxx"` 锚点切块解析逐请求用量与费用
 
@@ -16,18 +16,18 @@
 ## 安全设计
 
 - **Cookie 存 Keychain**,不落盘、不打印、不上传
-- 账号元数据 + 上次额度快照存 `~/Library/Application Support/OpenCodeGo/accounts.json`
+- 账号元数据 + 上次额度快照存 `~/Library/Application Support/OpenCode-Go-Quotas/accounts.json`
 - 所有请求只读,不消耗配额
 
 ## 构建与运行
 
 ```bash
 # 开发模式直接跑(无界面验证 UI 用 --demo)
-swift run OpenCodeGo --demo
+swift run OpenCode-Go-Quotas --demo
 
 # 打包成 .app(双击运行)
 bash scripts/bundle-app.sh
-open dist/OpenCodeGo.app
+open dist/OpenCode-Go-Quotas.app
 ```
 
 > 注意:`swift test` 需要完整 Xcode(本机 dev 目录指向 CommandLineTools):

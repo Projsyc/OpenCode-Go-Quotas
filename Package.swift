@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "OpenCodeGo",
+    name: "OpenCode-Go-Quotas",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "OpenCodeGo",
-            path: "Sources/OpenCodeGo"
+            name: "OpenCode-Go-Quotas",
+            path: "Sources/OpenCodeGo-Quotas"
         ),
         .testTarget(
-            name: "OpenCodeGoTests",
-            dependencies: ["OpenCodeGo"],
-            path: "Tests/OpenCodeGoTests"
+            name: "OpenCode-Go-QuotasTests",
+            dependencies: ["OpenCode-Go-Quotas"],
+            path: "Tests/OpenCodeGo-QuotasTests"
         ),
     ]
 )

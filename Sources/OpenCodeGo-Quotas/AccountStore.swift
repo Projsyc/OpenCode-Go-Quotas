@@ -18,7 +18,7 @@ final class AccountStore {
         self.keychain = KeychainHelper(service: "com.acccan.opencode-go")
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         self.fileURL = support
-            .appendingPathComponent("OpenCodeGo", isDirectory: true)
+            .appendingPathComponent("OpenCode-Go-Quotas", isDirectory: true)
             .appendingPathComponent("accounts.json")
         load()
         if ProcessInfo.processInfo.arguments.contains("--demo") {
