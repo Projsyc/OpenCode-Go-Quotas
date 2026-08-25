@@ -1,4 +1,4 @@
-# OpenCode-Go-Quotas 
+# OpenCode-Go-Quotas
 
 把 [Ruinique/opencode-go-dashboard](https://github.com/Ruinique/opencode-go-dashboard) 改造成的原生 Swift 应用。
 现代化 SwiftUI 界面(SVG 装饰 + 渐变仪表环):每个 opencode 账号展示 **Rolling / Weekly / Monthly** 三档用量与重置倒计时,附逐请求用量历史(今日 / 本周 / 本月 / 全部)。
