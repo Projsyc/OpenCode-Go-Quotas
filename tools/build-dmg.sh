@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键构建 OpenCode-Go-Quotas 安装包(icns + dmg)。
 # 用法: bash tools/build-dmg.sh
-# 前置: 本仓库 swift 构建(swift build -c release);pip3 install --user ds_store
+# 前置: 本仓库 swift 构建(swift build -c release);pip3 install --user ds_store mac-alias
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist/OpenCode-Go-Quotas.app"
@@ -29,18 +29,29 @@ fi
 codesign --force --deep -s "$SIGN_ID" "$DIST"
 swift "$ROOT/tools/render-dmg-background.swift"
 
-echo "==> 4/5 组装 staging + DS_Store 布局"
+echo "==> 4/5 组装 staging(背景图放卷根 .background.png)"
 STAGE="$HOME/Library/Caches/ocg-dmg-new"
 rm -rf "$STAGE"
-mkdir -p "$STAGE/.background"
+mkdir -p "$STAGE"
 cp -R "$DIST" "$STAGE/"
-cp /tmp/dmg-background.png "$STAGE/.background/background.png"
+cp /tmp/dmg-background.png "$STAGE/.background.png"
 ln -sf /Applications "$STAGE/Applications"
-touch "$STAGE/.DS_Store"
-python3 "$ROOT/tools/make-dsstore.py" "$STAGE" "OpenCode-Go-Quotas"
-SetFile -a V "$STAGE/.background" "$STAGE/.DS_Store"
+SetFile -a V "$STAGE/.background.png"
 
-echo "==> 5/5 hdiutil 打包"
-rm -f "$OUT"
-hdiutil create -volname "OpenCode-Go-Quotas" -srcfolder "$STAGE" -fs HFS+ -format UDZO "$OUT"
+echo "==> 5/5 UDRW 可写镜像 → 挂载写入 DS_Store(现代格式)→ 转 UDZO"
+TMPD="/tmp/ocg-build"
+mkdir -p "$TMPD"
+RW="$TMPD/OpenCode-Go-Quotas.rw.dmg"
+VOL="OpenCode-Go-Quotas"
+MOUNT="/Volumes/$VOL"
+rm -f "$RW" "$OUT"
+
+hdiutil create -volname "$VOL" -srcfolder "$STAGE" -fs HFS+ -format UDRW "$RW" >/dev/null
+hdiutil attach "$RW" -nobrowse -mountpoint "$MOUNT" -quiet
+python3 "$ROOT/tools/make-dsstore.py" "$MOUNT" "$VOL"
+SetFile -a V "$MOUNT/.DS_Store" "$MOUNT/.background.png"
+sync
+hdiutil detach "$MOUNT" -force -quiet
+
+hdiutil convert "$RW" -format UDZO -o "$OUT"
 echo "==> 完成: $OUT"

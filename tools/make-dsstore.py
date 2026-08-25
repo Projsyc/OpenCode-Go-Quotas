@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""生成 OpenCode-Go-Quotas dmg 的 .DS_Store(布局:背景图 + 图标位置,兼容 macOS Finder)。
+"""生成 OpenCode-Go-Quotas dmg 的 .DS_Store(现代 Finder 规范格式)。
 
-用法: make-dsstore.py <staging_dir> <volume_name>
-依赖: pip3 install --user ds_store(python2 时代的库,此处打补丁兼容 py3)
+用法: make-dsstore.py <mount_point> <volume_name>
+- 必须在「已挂载的可写镜像」上运行(镜像需先以 UDRW 构建并挂载),这样
+  backgroundImageAlias 才能引用卷内真实文件(mac_alias.Alias)。
+- 格式对齐 dmgbuild 的现代写法(dmgbuild PR #275):
+  * 根条目 vSrn / bwsp(窗口状态)/ icvp(图标视图选项)/ icvl(视图类型)
+  * icvp 用 backgroundType=2 + backgroundImageAlias,**不写 pBBk Bookmark**
+    —— macOS Tahoe 26.2+ 对 pBBk 有回归 bug,写了背景就不显示;
+  * 不用远古的 icvB/icvI 路径形式与 fwsw/fwsn。
+依赖: pip3 install --user ds_store mac-alias(py3 兼容见下方 patch)
 """
+import os
 import struct
 import sys
 
 from ds_store import buddy
 from ds_store.store import DSStore
+from mac_alias import Alias
 
 
 def patched_open(cls_factory_unused, file_or_name, mode='r+'):
@@ -54,18 +63,46 @@ buddy.Allocator.open = classmethod(patched_open)
 
 
 def main():
-    stage = sys.argv[1]
+    mount = sys.argv[1]
     vol = sys.argv[2]
-    ds = DSStore.open(f'{stage}/.DS_Store', 'w')
-    root = ds['.']
-    root['icvp'] = {
-        'icvh': 1, 'icvV': 1, 'icvS': 48, 'icvU': 0, 'icvG': 40, 'icvL': 0,
-        'icvB': -1,
-        'icvI': f'/Volumes/{vol}/.background/background.png',
+    app_name = 'OpenCode-Go-Quotas.app'
+
+    bg = os.path.join(mount, '.background.png')
+    alias = Alias.for_file(bg)
+
+    ds_path = os.path.join(mount, '.DS_Store')
+    open(ds_path, 'wb').close()  # 'w' 模式经 r+b 句柄写入,需先建文件
+    ds = DSStore.open(ds_path, 'w')
+    ds['.']['vSrn'] = ('long', 1)
+    ds['.']['bwsp'] = {
+        'ShowStatusBar': False,
+        'WindowBounds': '{{0, 0}, {600, 400}}',
+        'ContainerShowSidebar': False,
+        'PreviewPaneVisibility': False,
+        'SidebarWidth': 0,
+        'ShowTabView': False,
+        'ShowToolbar': True,
+        'ShowPathbar': False,
+        'ShowSidebar': False,
     }
-    root['fwsw'] = ('long', 600)
-    root['fwsn'] = ('long', 400)
-    ds['OpenCode-Go-Quotas.app']['Iloc'] = (150, 130)
+    ds['.']['icvp'] = {
+        'viewOptionsVersion': 1,
+        'backgroundType': 2,
+        'backgroundImageAlias': alias.to_bytes(),
+        'gridOffsetX': 0.0,
+        'gridOffsetY': 0.0,
+        'gridSpacing': 60.0,
+        'arrangeBy': 'none',
+        'showIconPreview': True,
+        'showItemInfo': False,
+        'labelOnBottom': True,
+        'textSize': 12.0,
+        'iconSize': 64.0,
+        'scrollPositionX': 0.0,
+        'scrollPositionY': 0.0,
+    }
+    ds['.']['icvl'] = (b'type', 'icnv')
+    ds[app_name]['Iloc'] = (150, 130)
     ds['Applications']['Iloc'] = (390, 130)
     ds.close()
     print('DS_Store written')
