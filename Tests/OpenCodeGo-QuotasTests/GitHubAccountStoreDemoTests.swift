@@ -53,7 +53,7 @@ final class GitHubAccountStoreDemoTests: XCTestCase {
         ])
         _ = try t.store.add(GitHubAccountInput(username: "added-user", password: "added-pass-123"))
         try t.store.clearCredential(t.store.accounts[0].id)
-        t.store.delete(t.store.accounts[0].id)
+        try t.store.delete(t.store.accounts[0].id)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: t.fileURL.path), "demo 模式不得创建 JSON 文件")
         XCTAssertEqual(t.spy.setCalls, 0, "demo 模式不得向注入的 Keychain 写入任何数据")

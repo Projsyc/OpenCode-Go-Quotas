@@ -186,7 +186,7 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         let task = Task { await t.store.refresh(accountB) }
         await fulfillment(of: [handlerStarted], timeout: 5)
 
-        t.store.deleteAccount(t.store.accounts[0].id) // 删除 A → B 的下标 1 → 0
+        try t.store.deleteAccount(t.store.accounts[0].id) // 删除 A → B 的下标 1 → 0
         gate.signal()
         await task.value
 
@@ -219,7 +219,7 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         let task = Task { await t.store.refresh(t.store.accounts[0]) }
         await fulfillment(of: [handlerStarted], timeout: 5)
 
-        t.store.deleteAccount(t.store.accounts[0].id)
+        try t.store.deleteAccount(t.store.accounts[0].id)
         gate.signal()
         await task.value
 
@@ -243,7 +243,7 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         let task = Task { await t.store.refresh(t.store.accounts[0]) }
         await fulfillment(of: [handlerStarted], timeout: 5)
 
-        t.store.deleteAccount(t.store.accounts[0].id)
+        try t.store.deleteAccount(t.store.accounts[0].id)
         gate.signal()
         await task.value
 
@@ -269,7 +269,7 @@ final class AccountStoreConcurrencyTests: XCTestCase {
         let task = Task { await t.store.loadHistory(t.store.accounts[0]) }
         await fulfillment(of: [handlerStarted], timeout: 5)
 
-        t.store.deleteAccount(t.store.accounts[0].id)
+        try t.store.deleteAccount(t.store.accounts[0].id)
         gate.signal()
         await task.value
 
@@ -764,5 +764,44 @@ final class AccountStoreConcurrencyTests: XCTestCase {
 
         XCTAssertFalse(t.store.isRefreshing, "重试完成后必须复位为 false")
         XCTAssertEqual(t.store.accounts[0].usageError, "请求失败 (HTTP 500)")
+    }
+}
+
+// MARK: - P0:保存失败可见化与一致性
+
+extension AccountStoreConcurrencyTests {
+
+    /// 磁盘目录不可写时，add 必须抛错；已写入的 Keychain 凭据回滚，内存不新增账号。
+    func testAddAccountSaveFailureRollsBackMemoryAndKeychain() throws {
+        let keychain = InMemoryKeychain()
+        let t = makeTempStore(keychain: keychain)
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        // 数据目录只读：目录创建/原子写必然失败。
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: t.dir.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: t.dir.path) }
+
+        XCTAssertThrowsError(try t.store.addAccount(
+            name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")) { error in
+            XCTAssertTrue(error.localizedDescription.hasPrefix("账号数据写入失败:"), error.localizedDescription)
+        }
+        XCTAssertTrue(t.store.accounts.isEmpty)
+        XCTAssertTrue(keychain.storage.isEmpty)
+    }
+
+    /// 删除必须先持久化 JSON；磁盘写失败时保留内存账号和 Keychain 凭据。
+    func testDeleteAccountSaveFailureKeepsMemoryAndKeychain() throws {
+        let keychain = InMemoryKeychain()
+        let t = makeTempStore(keychain: keychain)
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        let account = try t.store.addAccount(
+            name: "A", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        // 目录只读，删除后的元数据保存必然失败。
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: t.dir.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: t.dir.path) }
+
+        XCTAssertThrowsError(try t.store.deleteAccount(account.id))
+        XCTAssertEqual(t.store.accounts.count, 1)
+        XCTAssertEqual(keychain.get(account.id.uuidString), validCookie)
     }
 }

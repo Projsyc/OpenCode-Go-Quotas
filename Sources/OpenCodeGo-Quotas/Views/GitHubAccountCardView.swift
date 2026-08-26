@@ -3,6 +3,7 @@ import SwiftUI
 /// GitHub 账号卡片:GitHub 风头像 + 凭据徽章 + TOTP 实时验证码 / 一次性验证码状态 + 操作
 struct GitHubAccountCardView: View {
     @Environment(GitHubAccountStore.self) private var store
+    @Environment(TOTPClock.self) private var totpClock
 
     let account: GitHubAccount
 
@@ -62,7 +63,7 @@ struct GitHubAccountCardView: View {
             isPresented: $confirmingDelete,
             titleVisibility: .visible
         ) {
-            Button("删除", role: .destructive) { store.delete(account.id) }
+            Button("删除", role: .destructive) { try? store.delete(account.id) }
         }
     }
 
@@ -128,33 +129,31 @@ struct GitHubAccountCardView: View {
     private func totpRow(_ account: GitHubAccount) -> some View {
         Group {
             if let secret {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let code = TOTPGenerator.generate(secretBase32: secret, at: context.date)
-                    let remaining = TOTPGenerator.remainingSeconds(at: context.date)
-                    HStack(spacing: 12) {
-                        Text(code ?? "—")
-                            .font(.system(size: 28, weight: .semibold, design: .monospaced))
-                            .monospacedDigit()
-                            .contentTransition(.numericText())
-                        Spacer()
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.clockwise")
-                            Text("\(remaining)s")
-                        }
-                        .font(.callout.weight(.medium))
+                let code = TOTPGenerator.generate(secretBase32: secret, at: totpClock.now)
+                let remaining = TOTPGenerator.remainingSeconds(at: totpClock.now)
+                HStack(spacing: 12) {
+                    Text(code ?? "—")
+                        .font(.system(size: 28, weight: .semibold, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundStyle(remaining <= 5 ? Color.orange : Color.secondary)
+                        .contentTransition(.numericText())
+                    Spacer()
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("\(remaining)s")
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.blue.opacity(0.08)))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.blue.opacity(0.15)))
-                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .onTapGesture { copy(code, as: .code) }
-                    .help("点击复制验证码")
+                    .font(.callout.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(remaining <= 5 ? Color.orange : Color.secondary)
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.blue.opacity(0.08)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.blue.opacity(0.15)))
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .onTapGesture { copy(code, as: .code) }
+                .help("点击复制验证码")
             } else {
                 // keychain 缺凭据(显示「读取中…」是误导,数据不一致时永久挂着)
                 Text("未找到密钥")
@@ -167,25 +166,22 @@ struct GitHubAccountCardView: View {
 
     // MARK: - 一次性验证码状态行
 
-    /// 一次性验证码状态行。过期判定按 TimelineView 周期驱动(context.date),
-    /// 不再是一次性渲染:否则状态静止(悬停等重渲染才翻转),用户看到的
-    /// 「60 秒后失效」永远不会到期。
+    /// 一次性验证码状态行。过期判定由父级共享时钟驱动的 `totpClock.now` 刷新,
+    /// 避免每个卡片创建独立 `TimelineView`。
     private func oneTimeCodeStatus(_ account: GitHubAccount) -> some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let expired = Self.isOneTimeCodeExpired(account, at: context.date)
-            HStack(spacing: 8) {
-                Image(systemName: expired ? "clock.badge.xmark" : "clock")
-                    .font(.callout)
-                    .foregroundStyle(expired ? Color.gray.opacity(0.45) : Color.orange)
-                Text(expired ? "已失效" : "验证码 60 秒后失效")
-                    .font(.callout)
-                    .foregroundStyle(expired ? .tertiary : .secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.orange.opacity(0.06)))
+        let expired = Self.isOneTimeCodeExpired(account, at: totpClock.now)
+        return HStack(spacing: 8) {
+            Image(systemName: expired ? "clock.badge.xmark" : "clock")
+                .font(.callout)
+                .foregroundStyle(expired ? Color.gray.opacity(0.45) : Color.orange)
+            Text(expired ? "已失效" : "验证码 60 秒后失效")
+                .font(.callout)
+                .foregroundStyle(expired ? .tertiary : .secondary)
+            Spacer()
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.orange.opacity(0.06)))
     }
 
     /// 一次性验证码 60 秒有效期判定(纯函数,可单测);无记录时间视为已过期

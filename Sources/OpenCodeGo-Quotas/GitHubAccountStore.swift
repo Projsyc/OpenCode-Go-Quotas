@@ -8,28 +8,18 @@ struct GitHubImportSummary: Equatable, Sendable {
     var skipped: [GitHubImportSkip]
 }
 
-/// 批量导入中被跳过的行(行号 + 原因)
-struct GitHubImportSkip: Equatable, Sendable {
+/// 批量导入中被跳过的行(行号 + 原因)。
+/// `id` 用于 SwiftUI 稳定标识：同一输入行可能产生多条跳过记录（例如 Keychain
+/// 写入失败与后续整批回滚诊断），仅用 lineNumber 会导致 ForEach ID 冲突。
+struct GitHubImportSkip: Equatable, Identifiable, Sendable {
+    let id: UUID
     var lineNumber: Int
     var reason: String
-}
 
-/// GitHub 账号存储错误
-enum GitHubAccountStoreError: LocalizedError, Equatable {
-    case emptyUsername
-    case usernameContainsWhitespace
-    case passwordTooShort
-    case duplicateUsername(String)
-    case credentialWithoutKind
-
-    var errorDescription: String? {
-        switch self {
-        case .emptyUsername: return "用户名不能为空"
-        case .usernameContainsWhitespace: return "用户名不能包含空白字符"
-        case .passwordTooShort: return "密码至少 6 个字符"
-        case .duplicateUsername(let name): return "用户名 \(name) 已存在"
-        case .credentialWithoutKind: return "提供验证码/TOTP secret 时必须指定凭据类型"
-        }
+    init(lineNumber: Int, reason: String, id: UUID = UUID()) {
+        self.id = id
+        self.lineNumber = lineNumber
+        self.reason = reason
     }
 }
 
@@ -47,9 +37,13 @@ final class GitHubAccountStore {
 
     private let keychain: KeychainStoring
     private let fileURL: URL
-    /// 写前滚动快照路径(单份):每次 save 前把当前 github-accounts.json 复制到这里
-    private var snapshotURL: URL {
-        fileURL.deletingLastPathComponent().appendingPathComponent("github-accounts.json.bak")
+    /// JSON 落盘、写前快照、损坏留证和快照恢复统一委托给通用存储。
+    private var persistence: JSONFileStore<[GitHubAccount]> {
+        JSONFileStore(
+            fileURL: fileURL,
+            subject: "GitHub 账号",
+            sourceName: "github-accounts.json",
+            logger: Self.logger)
     }
 
     /// - Parameters:
@@ -114,115 +108,22 @@ final class GitHubAccountStore {
 
     // MARK: - 持久化
 
-    /// 幂等加载:JSON 不存在或解码失败时静默为空数组;demo 模式不读盘(数据为预置假账号)。
-    /// 主文件存在但解码失败(损坏)时,优先从写前快照 github-accounts.json.bak 恢复;
-    /// 快照同样不可用才按原行为(空数组),绝不静默清空。
     private func load() {
+        let result = persistence.load()
+        accounts = result.model ?? []
+        loadError = result.recoveryMessage
+    }
+
+    /// 保存失败必须可见：磁盘不可写/编码失败时更新 loadError，调用方可据此回滚内存状态。
+    private func save() throws {
         guard !demoMode else { return }
-        guard let data = try? Data(contentsOf: fileURL) else { return } // 不存在/不可读 → 首次运行
         do {
-            accounts = try JSONDecoder().decode([GitHubAccount].self, from: data)
-        } catch {
-            if let backupData = try? Data(contentsOf: snapshotURL),
-               let recovered = try? JSONDecoder().decode([GitHubAccount].self, from: backupData) {
-                // 从快照恢复:仅换「读哪个文件」,不改账号字段/解码语义
-                accounts = recovered
-                // 先尽力把损坏原件复制留证,再把恢复内容写回主文件(否则下次启动会因
-                // 主文件缺失/损坏被当成首次运行,恢复结果丢失)
-                let backupName = stashCorruptedFile(move: false)
-                restoreMainFileFromSnapshot()
-                if let backupName {
-                    loadError = "GitHub 账号数据文件损坏，已从备份恢复数据（原文件已备份为 \(backupName)）"
-                } else {
-                    loadError = "GitHub 账号数据文件损坏，已从备份恢复数据"
-                }
-                Self.logger.error("github-accounts.json 解码失败，已从快照恢复数据")
-            } else {
-                // 快照缺失或同样损坏 → 尽量移动损坏原件留证后置空(否则下次 save()
-                // 的全量覆盖会永久丢弃它,且写前快照会抄到损坏内容)
-                accounts = []
-                if let backupName = stashCorruptedFile(move: true) {
-                    loadError = "GitHub 账号数据文件损坏，已备份为 \(backupName)，请检查后重新添加"
-                } else {
-                    loadError = "GitHub 账号数据文件损坏，且备份失败，请检查后重新添加"
-                }
-                Self.logger.error("github-accounts.json 解码失败且快照不可用，已置空")
-            }
-        }
-    }
-
-    /// 把损坏的 github-accounts.json 移动/复制备份为 github-accounts.json.bak-<时间戳>
-    /// (同秒冲突自动加序号)。返回备份名;失败返回 nil(备份是保险不是依赖,调用方不阻断)。
-    @discardableResult
-    private func stashCorruptedFile(move: Bool) -> String? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let stamp = formatter.string(from: Date())
-        let dir = fileURL.deletingLastPathComponent()
-        var backupName = "github-accounts.json.bak-\(stamp)"
-        var backupURL = dir.appendingPathComponent(backupName)
-        var suffix = 2
-        while FileManager.default.fileExists(atPath: backupURL.path) {
-            backupName = "github-accounts.json.bak-\(stamp)-\(suffix)"
-            backupURL = dir.appendingPathComponent(backupName)
-            suffix += 1
-        }
-        do {
-            if move {
-                try FileManager.default.moveItem(at: fileURL, to: backupURL)
-            } else {
-                try FileManager.default.copyItem(at: fileURL, to: backupURL)
-            }
-            return backupName
-        } catch {
-            return nil
-        }
-    }
-
-    /// 恢复后把主文件写回可用状态:用快照内容覆盖损坏的 github-accounts.json(字节一致)。
-    /// 失败仅记日志 —— 内存中的恢复结果仍在,且会话内任意一次 save() 会重新落盘。
-    private func restoreMainFileFromSnapshot() {
-        do {
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                try FileManager.default.removeItem(at: fileURL)
-            }
-            try FileManager.default.copyItem(at: snapshotURL, to: fileURL)
-        } catch {
-            Self.logger.error("从快照写回 github-accounts.json 失败: \(error.localizedDescription)")
-        }
-    }
-
-    /// demo 模式不落盘(内存存储)
-    private func save() {
-        guard !demoMode else { return }
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        snapshotBeforeWrite()
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(accounts) else { return }
-        do {
-            try data.write(to: fileURL, options: .atomic)
-            // 首次成功落盘后清空启动加载错误;写盘失败时保留
+            try persistence.save(accounts)
+            // 首次成功落盘后清空启动加载错误。
             loadError = nil
         } catch {
-            // 写盘失败 → 保留 loadError(数据仍不可靠)
-            Self.logger.error("github-accounts.json 写盘失败: \(error.localizedDescription)")
-        }
-    }
-
-    /// 写盘前把当前 github-accounts.json 复制为滚动快照 github-accounts.json.bak(单份):
-    /// 仅当写前文件已存在才快照(首次写入无旧文件 → 跳过);失败不阻断保存,只记日志
-    /// (备份是保险不是依赖)。
-    private func snapshotBeforeWrite() {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
-        do {
-            if FileManager.default.fileExists(atPath: snapshotURL.path) {
-                try FileManager.default.removeItem(at: snapshotURL)
-            }
-            try FileManager.default.copyItem(at: fileURL, to: snapshotURL)
-        } catch {
-            Self.logger.error("写前快照 github-accounts.json.bak 失败: \(error.localizedDescription)")
+            loadError = error.localizedDescription
+            throw error
         }
     }
 
@@ -236,13 +137,8 @@ final class GitHubAccountStore {
 
     @discardableResult
     func add(_ input: GitHubAccountInput) throws -> GitHubAccount {
-        let name = input.username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { throw GitHubAccountStoreError.emptyUsername }
-        guard !name.contains(where: { $0.isWhitespace }) else {
-            throw GitHubAccountStoreError.usernameContainsWhitespace
-        }
-        let pwd = input.password.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard pwd.count >= 6 else { throw GitHubAccountStoreError.passwordTooShort }
+        let name = try GitHubAccountStoreError.validatedUsername(input.username)
+        let pwd = try GitHubAccountStoreError.validatedPassword(input.password)
         guard input.credential == nil || input.kind != nil else { throw GitHubAccountStoreError.credentialWithoutKind }
         guard !accounts.contains(where: { $0.username.lowercased() == name.lowercased() }) else {
             throw GitHubAccountStoreError.duplicateUsername(name)
@@ -265,7 +161,14 @@ final class GitHubAccountStore {
             throw error
         }
         accounts.append(account)
-        save()
+        do {
+            try save()
+        } catch {
+            accounts.removeAll { $0.id == account.id }
+            keychain.delete(passwordKey)
+            if input.credential != nil { keychain.delete(key("credential", account.id)) }
+            throw error
+        }
         return account
     }
 
@@ -279,14 +182,9 @@ final class GitHubAccountStore {
         passwordChanged: Bool
     ) throws {
         guard let i = accounts.firstIndex(where: { $0.id == id }) else { return }
-        let name = input.username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { throw GitHubAccountStoreError.emptyUsername }
-        guard !name.contains(where: { $0.isWhitespace }) else {
-            throw GitHubAccountStoreError.usernameContainsWhitespace
-        }
-        if passwordChanged,
-           input.password.trimmingCharacters(in: .whitespacesAndNewlines).count < 6 {
-            throw GitHubAccountStoreError.passwordTooShort
+        let name = try GitHubAccountStoreError.validatedUsername(input.username)
+        if passwordChanged {
+            _ = try GitHubAccountStoreError.validatedPassword(input.password)
         }
         if accounts.contains(where: { $0.id != id && $0.username.lowercased() == name.lowercased() }) {
             throw GitHubAccountStoreError.duplicateUsername(name)
@@ -311,6 +209,7 @@ final class GitHubAccountStore {
             }
             throw error
         }
+        let oldAccount = accounts[i]
         // Keychain 全部写入成功后才改内存
         accounts[i].username = name
         accounts[i].notes = input.notes
@@ -321,25 +220,47 @@ final class GitHubAccountStore {
         } else if let kind = input.kind {
             accounts[i].credentialKind = kind
         }
-        save()
+        do {
+            try save()
+        } catch {
+            accounts[i] = oldAccount
+            throw error
+        }
     }
 
-    func delete(_ id: UUID) {
+    /// 先持久化“账号已删除”，成功后再删除 Keychain；写盘失败时保留账号和凭据。
+    func delete(_ id: UUID) throws {
         guard let i = accounts.firstIndex(where: { $0.id == id }) else { return }
+        var updatedAccounts = accounts
+        updatedAccounts.remove(at: i)
+        let oldAccounts = accounts
+        accounts = updatedAccounts
+        do {
+            try save()
+        } catch {
+            accounts = oldAccounts
+            throw error
+        }
         keychain.delete(key("password", id))
         keychain.delete(key("credential", id))
-        accounts.remove(at: i)
-        save()
     }
 
     /// 清除已存的凭据(TOTP secret 或一次性验证码);密码不受影响
     func clearCredential(_ id: UUID) throws {
         guard let i = accounts.firstIndex(where: { $0.id == id }) else { return }
+        let oldCredential = keychain.get(key("credential", id))
         keychain.delete(key("credential", id))
+        let oldAccount = accounts[i]
         accounts[i].credentialKind = nil
         accounts[i].lastCodeAt = nil
         accounts[i].updatedAt = Date()
-        save()
+        do {
+            try save()
+        } catch {
+            try? keychain.set(oldCredential ?? "", forKey: key("credential", id))
+            accounts[i] = oldAccount
+            throw error
+        }
     }
 
     func password(for account: GitHubAccount) -> String? {
@@ -352,27 +273,27 @@ final class GitHubAccountStore {
 
     // MARK: - 批量导入
 
-    /// 批量导入:行级独立校验,无效行不阻塞有效行;同一 username 已存在则跳过(不覆盖,防止手滑覆盖现有账号)
+    /// 批量导入:行级独立校验,无效行不阻塞有效行;同一 username 已存在则跳过(不覆盖,防止手滑覆盖现有账号)。
+    /// Keychain 已写入的行先暂存；只有元数据整体落盘成功才提交，写盘失败时回滚全部新账号与凭据。
     func importBatch(_ rows: [GitHubImportRow]) throws -> GitHubImportSummary {
         var imported = 0
         var skipped: [GitHubImportSkip] = []
+        var writtenKeys: [String] = []
+        let originalAccounts = accounts
         var seenUsernames = Set(accounts.map { $0.username.lowercased() })
 
         for row in rows {
+            do {
+                _ = try GitHubAccountStoreError.validatedUsername(row.username)
+                _ = try GitHubAccountStoreError.validatedPassword(row.password)
+            } catch let error as GitHubAccountStoreError {
+                skipped.append(GitHubImportSkip(
+                    lineNumber: row.lineNumber,
+                    reason: error.errorDescription ?? "账号数据无效"))
+                continue
+            }
             let name = row.username.trimmingCharacters(in: .whitespacesAndNewlines)
             let pwd = row.password.trimmingCharacters(in: .whitespacesAndNewlines)
-            if name.isEmpty {
-                skipped.append(GitHubImportSkip(lineNumber: row.lineNumber, reason: "用户名不能为空"))
-                continue
-            }
-            if name.contains(where: { $0.isWhitespace }) {
-                skipped.append(GitHubImportSkip(lineNumber: row.lineNumber, reason: "用户名不能包含空白字符"))
-                continue
-            }
-            if pwd.count < 6 {
-                skipped.append(GitHubImportSkip(lineNumber: row.lineNumber, reason: "密码至少 6 个字符"))
-                continue
-            }
             if let cred = row.credential, cred.trimmingCharacters(in: .whitespaces).isEmpty {
                 // 空串凭据 + 非空 kind 会命中 (credential?, kind?) 分支写出空凭据
                 // → 卡片 TOTP 永远显示「—」;行级跳过(防御,解析器正常不会产出)
@@ -400,6 +321,8 @@ final class GitHubAccountStore {
                         keychain.delete(key("password", account.id))
                         throw error
                     }
+                    writtenKeys.append(key("password", account.id))
+                    writtenKeys.append(key("credential", account.id))
                 } catch {
                     skipped.append(GitHubImportSkip(
                         lineNumber: row.lineNumber,
@@ -410,6 +333,7 @@ final class GitHubAccountStore {
                 account = GitHubAccount(username: name, notes: "", credentialKind: nil, lastCodeAt: nil)
                 do {
                     try keychain.set(pwd, forKey: key("password", account.id))
+                    writtenKeys.append(key("password", account.id))
                 } catch {
                     skipped.append(GitHubImportSkip(
                         lineNumber: row.lineNumber,
@@ -424,7 +348,18 @@ final class GitHubAccountStore {
             seenUsernames.insert(name.lowercased())
             imported += 1
         }
-        save()
+
+        guard imported > 0 else {
+            return GitHubImportSummary(imported: 0, skipped: skipped)
+        }
+
+        do {
+            try save()
+        } catch {
+            accounts = originalAccounts
+            for keyPath in writtenKeys { keychain.delete(keyPath) }
+            throw error
+        }
         return GitHubImportSummary(imported: imported, skipped: skipped)
     }
 }

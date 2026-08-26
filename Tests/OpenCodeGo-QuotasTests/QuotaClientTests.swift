@@ -336,7 +336,7 @@ final class QuotaClientTests: XCTestCase {
         const data1 = { id:"usg_Cross1", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, total_cost:98711933, cost:0.0123, keyID:"key_1", sessionID:"ses_1", plan:null };
         """
 
-        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(body, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(items[0].cost, 0.0123 * QuotaClient.historyCostScale, accuracy: 1e-14,
@@ -357,7 +357,7 @@ final class QuotaClientTests: XCTestCase {
         const data2 = { id:"usg_Norm", timeCreated:new Date("2026-08-24T01:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:98711933, keyID:"key_2", sessionID:"ses_2", plan:null };
         """
 
-        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(body, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 2)
         XCTAssertEqual(items[0].cost, 98.711933, accuracy: 1e-9, "9871193300 × 10⁻⁸ = $98.71,超阈值")
@@ -376,7 +376,7 @@ final class QuotaClientTests: XCTestCase {
     func testParseHistoryBodySkipsDiagBelowThreshold() throws {
         let dir = makeTempDir("normal")
         // historyBody 两条记录 cost 分别为 0.0123 / 0.045,均低于阈值 → 不写日志
-        let items = QuotaClient.parseHistoryBody(historyBody, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(historyBody, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("history.log").path))
@@ -394,7 +394,7 @@ final class QuotaClientTests: XCTestCase {
         const data2 = { id:"usg_Scale1", timeCreated:new Date("2026-08-25T01:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:323852, keyID:"key_2", sessionID:"ses_2", plan:null };
         """
 
-        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(body, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 2)
         XCTAssertEqual(items[0].cost, 0, "cost:0 缩放后仍为 0")
@@ -420,7 +420,7 @@ final class QuotaClientTests: XCTestCase {
         const data3 = { id:"usg_Cost3", timeCreated:new Date("2026-08-23T02:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, totalcost:98711933, cost:350000, keyID:"key_3", sessionID:"ses_3", plan:null };
         """
 
-        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(body, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 3)
         XCTAssertEqual(items[0].cost, 0.0019, accuracy: 1e-12, "total_cost 不应抢匹配")
@@ -435,7 +435,7 @@ final class QuotaClientTests: XCTestCase {
         const data1 = { id:"usg_Key1", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:100000, apikeyID:"key_wrong", keyID:"key_right", sessionID:"ses_1", plan:null };
         """
 
-        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(body, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(items[0].keyID, "key_right", "keyID 不应从 apikeyID 抢匹配")
@@ -449,7 +449,7 @@ final class QuotaClientTests: XCTestCase {
         const data1 = { uid:"usg_fake", id:"usg_Real1", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:100000, keyID:"key_1", sessionID:"ses_1", plan:null };
         """
 
-        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(body, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 1, "uid 处的伪锚点不应产生记录")
         XCTAssertEqual(items[0].id, "usg_Real1")
@@ -462,7 +462,7 @@ final class QuotaClientTests: XCTestCase {
         const data1 = { id:"usg_NoCost", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, keyID:"key_1", sessionID:"ses_1", plan:null };
         """
 
-        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(body, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(items[0].cost, 0, "无 cost 字段时应默认 0")
@@ -476,7 +476,7 @@ final class QuotaClientTests: XCTestCase {
         const data1 = { id:"usg_Trunc", timeCreated:new Date("2026-08-23T00:00:00.000Z"), model:"gpt-test", provider:"openai", inputTokens:1, outputTokens:1, reasoningTokens:0, cacheReadTokens:0, cost:1000000, keyID:"key_1", sessionID:"ses_1", plan:null, padding:"\(padding)" };
         """
 
-        let items = QuotaClient.parseHistoryBody(body, diag: HistoryDiagSink(directory: dir))
+        let items = QuotaClient.parseHistoryBody(body, diag: .history(directory: dir))
 
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(items[0].id, "usg_Trunc")
@@ -519,5 +519,22 @@ final class QuotaClientTests: XCTestCase {
         XCTAssertEqual(AccountCardView.resetText(from: 3_600 * 2 + 52 * 60), "2 小时 52 分")
         XCTAssertEqual(AccountCardView.resetText(from: 61), "1 分 1 秒")
         XCTAssertEqual(AccountCardView.resetText(from: -5), "0 秒")
+    }
+}
+
+// MARK: - P0 错误分类
+
+final class QuotaErrorClassifcationTests: XCTestCase {
+    func testPermanentErrorsAreNotRetryable() {
+        XCTAssertTrue(QuotaError.invalidWorkspaceId("bad").isPermanent)
+        XCTAssertTrue(QuotaError.invalidAuthCookie("bad").isPermanent)
+        XCTAssertTrue(QuotaError.parseFailed("structure changed").isPermanent)
+    }
+
+    func testTransientErrorsRemainRetryable() {
+        XCTAssertFalse(QuotaError.authFailed.isPermanent)
+        XCTAssertFalse(QuotaError.sessionExpired.isPermanent)
+        XCTAssertFalse(QuotaError.httpError(500).isPermanent)
+        XCTAssertFalse(QuotaError.endpointGone.isPermanent)
     }
 }

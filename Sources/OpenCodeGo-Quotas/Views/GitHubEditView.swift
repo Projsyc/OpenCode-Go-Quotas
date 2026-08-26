@@ -153,8 +153,7 @@ struct GitHubEditView: View {
     /// GitHub 密码技术上可含首尾空格,trim 后是另一个密码 —— 保存前提示用户知情。
     /// trim 后为空的纯空白密码不算(由「密码至少 6 个字符」校验兜底)。
     static func passwordContainsEdgeWhitespace(_ password: String) -> Bool {
-        let trimmed = password.trimmingCharacters(in: .whitespaces)
-        return !trimmed.isEmpty && trimmed != password
+        GitHubPasswordWhitespacePolicy.isNotableFormValue(password)
     }
 
     private var passwordHintVisible: Bool {
@@ -182,12 +181,20 @@ struct GitHubEditView: View {
     }
 
     private func save() throws {
-        let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { throw SaveError.message("用户名不能为空") }
-        guard !name.contains(where: { $0.isWhitespace }) else {
-            throw SaveError.message("用户名不能包含空白字符")
+        let name: String
+        do {
+            name = try GitHubAccountStoreError.validatedUsername(username)
+        } catch {
+            throw SaveError.message(error.localizedDescription)
         }
         let passwordValue = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !isEditing || !passwordValue.isEmpty {
+            do {
+                _ = try GitHubAccountStoreError.validatedPassword(passwordValue)
+            } catch {
+                throw SaveError.message(error.localizedDescription)
+            }
+        }
         let credentialValue = credential.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 有凭据但未显式选择类型时按内容推断(严格 base32,截断 secret 推断不出);推断不出则报错

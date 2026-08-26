@@ -100,6 +100,18 @@ final class GitHubImportViewTests: XCTestCase {
     }
 
     /// skipText:行号 0(importBatch 整批级错误)→「导入错误:」,非「第 0 行:」
+    func testImportSkipHasStableIdentityWhenSameLineProducesMultipleReasons() {
+        // 防御同一行出现多条跳过记录（例如凭据写入失败 + 整批回滚诊断）时，
+        // SwiftUI 不能再用重复的 lineNumber 作为 ForEach identity。
+        let first = GitHubImportSkip(lineNumber: 7, reason: "凭据写入失败")
+        let second = GitHubImportSkip(lineNumber: 7, reason: "凭据写入失败")
+
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertEqual([first, second].map(\.id).count, Set([first.id, second.id]).count)
+        XCTAssertEqual(first.lineNumber, second.lineNumber)
+        XCTAssertEqual(first.reason, second.reason)
+    }
+
     func testSkipTextZeroLineNumberUsesImportError() {
         XCTAssertEqual(GitHubImportView.skipText(GitHubImportSkip(lineNumber: 0, reason: "写盘失败")),
                        "导入错误:写盘失败")

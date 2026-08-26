@@ -73,7 +73,7 @@ struct AccountCardView: View {
             isPresented: $confirmingDelete,
             titleVisibility: .visible
         ) {
-            Button("删除", role: .destructive) { store.deleteAccount(account.id) }
+            Button("删除", role: .destructive) { try? store.deleteAccount(account.id) }
         }
     }
 

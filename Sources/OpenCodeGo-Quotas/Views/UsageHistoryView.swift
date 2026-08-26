@@ -1,49 +1,31 @@
+import Combine
 import SwiftUI
 
 /// 用量历史:今日 / 本周 / 本月 / 全部 筛选 + 汇总 + 明细表
 struct UsageHistoryView: View {
     @Environment(AccountStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     let accountID: Account.ID
 
-    private enum Range: String, CaseIterable, Identifiable {
-        case today = "今日"
-        case week = "本周"
-        case month = "本月"
-        case all = "全部"
-        var id: String { rawValue }
-    }
+    @State private var range: UsageTimeRange = .today
+    /// 历史加载后的预计算汇总；body 只读取该结果。
+    @State private var stats: UsageStats?
+    /// 当前筛选的缓存明细与汇总，避免分段表格每次渲染重复聚合。
+    @State private var selection: SelectionSnapshot?
 
-    @State private var range: Range = .today
+    private struct SelectionSnapshot: Equatable {
+        let items: [UsageHistoryItem]
+        let summary: UsagePeriodSummary
+    }
 
     private var account: Account? {
         store.accounts.first { $0.id == accountID }
     }
 
-    private var filtered: [UsageHistoryItem] {
-        guard let history = account?.history else { return [] }
-        let cal = Calendar.current
-        let now = Date()
-        return history.filter { item in
-            switch range {
-            case .today: return cal.isDateInToday(item.timeCreated)
-            case .week: return cal.isDate(item.timeCreated, equalTo: now, toGranularity: .weekOfYear)
-            case .month: return cal.isDate(item.timeCreated, equalTo: now, toGranularity: .month)
-            case .all: return true
-            }
-        }
-    }
-
-    private var totals: (requests: Int, tokens: Int, cost: Double) {
-        var requests = 0, tokens = 0, cost = 0.0
-        for item in filtered {
-            requests += 1
-            tokens += item.totalTokens
-            cost += item.cost
-        }
-        return (requests, tokens, cost)
-    }
+    /// 跨过自然日 / 周 / 月后刷新快照；低频时钟比每次 body 全量扫描更便宜。
+    private let refreshClock = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,6 +40,18 @@ struct UsageHistoryView: View {
             footer
         }
         .frame(minWidth: 760, minHeight: 460)
+        .onChange(of: scenePhase) { _, _ in
+            recalculateStats()
+        }
+        .onReceive(refreshClock) { _ in
+            recalculateStats()
+        }
+        .onChange(of: range) { _, _ in
+            applySelectedRange()
+        }
+        .task(id: account?.history) {
+            recalculateStats()
+        }
         .task {
             guard let account else { return }
             let hasCookie = store.demoMode || store.cookie(for: account) != nil
@@ -70,14 +64,31 @@ struct UsageHistoryView: View {
     // MARK: - 顶部汇总(今日 / 本周 / 本月费用,风格对齐主界面 statChip)
 
     private var summaryStrip: some View {
-        HStack(spacing: 10) {
-            statCard(value: Self.fmtCost(todayCost), label: "今日费用")
-            statCard(value: Self.fmtCost(weekCost), label: "本周费用")
-            statCard(value: Self.fmtCost(monthCost), label: "本月费用")
+        let resolvedStats = stats ?? UsageStats(history: account?.history ?? [])
+        return HStack(spacing: 10) {
+            statCard(value: Self.fmtCost(resolvedStats.today.cost), label: "今日费用")
+            statCard(value: Self.fmtCost(resolvedStats.week.cost), label: "本周费用")
+            statCard(value: Self.fmtCost(resolvedStats.month.cost), label: "本月费用")
             Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    /// 只在首次渲染 / 历史加载 / 跨应用生命周期切换时重算；
+    /// 后续渲染复用同一快照，保证汇总和明细的时间参考一致。
+    private func recalculateStats() {
+        let history = account?.history ?? []
+        let newStats = UsageStats(history: history)
+        apply(newStats, to: history)
+    }
+
+    private func applySelectedRange() {
+        guard let stats else {
+            recalculateStats()
+            return
+        }
+        apply(stats, to: account?.history ?? [])
     }
 
     private func statCard(value: String, label: String) -> some View {
@@ -99,23 +110,10 @@ struct UsageHistoryView: View {
                         .strokeBorder(Color.primary.opacity(0.08))))
     }
 
-    private var todayCost: Double { cost(in: .today) }
-    private var weekCost: Double { cost(in: .week) }
-    private var monthCost: Double { cost(in: .month) }
-
-    /// 按自然日 / 自然周 / 自然月统计全部历史的费用(不受当前筛选影响)
-    private func cost(in range: Range) -> Double {
-        guard let history = account?.history else { return 0 }
-        let cal = Calendar.current
-        let now = Date()
-        return history.reduce(0.0) { acc, item in
-            switch range {
-            case .today: return cal.isDateInToday(item.timeCreated) ? acc + item.cost : acc
-            case .week: return cal.isDate(item.timeCreated, equalTo: now, toGranularity: .weekOfYear) ? acc + item.cost : acc
-            case .month: return cal.isDate(item.timeCreated, equalTo: now, toGranularity: .month) ? acc + item.cost : acc
-            case .all: return acc + item.cost
-            }
-        }
+    private func apply(_ stats: UsageStats, to history: [UsageHistoryItem]) {
+        let items = stats.items(in: history, for: range)
+        self.stats = stats
+        selection = SelectionSnapshot(items: items, summary: Self.summary(of: items))
     }
 
     private var header: some View {
@@ -128,7 +126,7 @@ struct UsageHistoryView: View {
                 .textSelection(.enabled)
             Spacer()
             Picker("", selection: $range) {
-                ForEach(Range.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(UsageTimeRange.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .frame(width: 260)
@@ -159,7 +157,7 @@ struct UsageHistoryView: View {
             } actions: {
                 Button("加载历史") { if let a = account { Task { await store.loadHistory(a) } } }
             }
-        } else if filtered.isEmpty {
+        } else if displayedItems.isEmpty {
             ContentUnavailableView("该时间段没有用量记录", systemImage: "tray")
         } else {
             table
@@ -167,7 +165,7 @@ struct UsageHistoryView: View {
     }
 
     private var table: some View {
-        Table(filtered) {
+        Table(displayedItems) {
             TableColumn("时间") { item in
                 Text(item.timeCreated, format: .dateTime
                     .year().month().day().hour().minute())
@@ -221,14 +219,43 @@ struct UsageHistoryView: View {
 
     private var footer: some View {
         HStack {
-            Text("\(filtered.count) 次请求 · \(Self.fmtCompact(totals.tokens)) tokens")
+            Text("\(displayedItems.count) 次请求 · \(Self.fmtCompact(displayedSummary.tokens)) tokens")
             Spacer()
-            Text("合计费用: \(Self.fmtCost(totals.cost))")
+            Text("合计费用: \(Self.fmtCost(displayedSummary.cost))")
                 .fontWeight(.medium)
         }
         .font(.callout)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var displayedItems: [UsageHistoryItem] {
+        if let selection {
+            return selection.items
+        }
+        // 首帧兜底：task 尚未写入缓存时仍按旧口径展示一次。
+        guard let history = account?.history else { return [] }
+        let now = Date()
+        let calendar = Calendar.current
+        return history.filter { item in
+            switch range {
+            case .today: return calendar.isDateInToday(item.timeCreated)
+            case .week: return calendar.isDate(item.timeCreated, equalTo: now, toGranularity: .weekOfYear)
+            case .month: return calendar.isDate(item.timeCreated, equalTo: now, toGranularity: .month)
+            case .all: return true
+            }
+        }
+    }
+
+    private var displayedSummary: UsagePeriodSummary {
+        if let selection {
+            return selection.summary
+        }
+        return Self.summary(of: displayedItems)
+    }
+
+    private static func summary(of items: [UsageHistoryItem]) -> UsagePeriodSummary {
+        items.reduce(into: UsagePeriodSummary.empty) { $0 += $1 }
     }
 
     static func fmt(_ n: Int) -> String {

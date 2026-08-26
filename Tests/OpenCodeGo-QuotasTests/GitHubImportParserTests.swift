@@ -133,7 +133,7 @@ final class GitHubImportParserTests: XCTestCase {
     func testPasswordTooShort() {
         XCTAssertThrowsError(try GitHubImportParser.parse("u1,short")) { error in
             XCTAssertEqual(error as? GitHubParseError,
-                           .invalidRow(line: 1, reason: "密码不能为空且至少 6 个字符"))
+                           .invalidRow(line: 1, reason: "密码至少 6 个字符"))
         }
     }
 

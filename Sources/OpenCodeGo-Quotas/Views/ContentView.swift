@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// 主界面分段:OpenCode 额度 / GitHub 账号
@@ -22,25 +23,28 @@ struct ContentView: View {
     @State private var showingAdd = false
     @State private var showingImport = false
     @State private var showingAddGitHub = false
-    /// 「知道了」仅本次会话隐藏 loadError 横幅(不改 Store.loadError —— 数据仍有风险时
-    /// 错误来源必须保留,只是视图不再展示;Store 首次成功保存后会自动清空)
-    @State private var loadErrorDismissed = false
+    /// 「知道了」按错误来源记录；Store 错误变化或清空后会重置该来源的确认状态。
+    @State private var dismissedLoadErrors: Set<LoadErrorSource> = []
+    @Environment(\.scenePhase) private var scenePhase
+    /// 历史加载后的今日费用缓存；账号列表变化或跨生命周期时刷新。
+    @State private var cachedTodayCost: Double?
+    private let refreshClock = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
-    /// 任一 Store 有启动加载错误时显示横幅(账号优先, GitHub 第二行)
-    private var hasLoadError: Bool {
-        store.loadError != nil || githubStore.loadError != nil
+    /// 当前可见错误(账号优先, GitHub 第二行)。
+    private var visibleLoadErrors: [LoadErrorMessage] {
+        LoadErrorBannerModel(
+            accountMessage: store.loadError,
+            githubMessage: githubStore.loadError
+        ).visibleMessages(dismissing: dismissedLoadErrors)
     }
 
+    /// 首帧兜底；task 写入缓存后不再在每次渲染重复遍历所有历史。
     private var todayCost: Double? {
-        var total: Double? = nil
-        for account in store.accounts {
-            guard let history = account.history else { continue }
-            let cal = Calendar.current
-            let day = history.filter { cal.isDateInToday($0.timeCreated) }
-                .reduce(0.0) { $0 + $1.cost }
-            total = (total ?? 0) + day
-        }
-        return total
+        cachedTodayCost ?? UsageStats.combinedTodayCost(of: store.accounts)
+    }
+
+    private func refreshTodayCost() {
+        cachedTodayCost = UsageStats.combinedTodayCost(of: store.accounts)
     }
 
     var body: some View {
@@ -49,8 +53,8 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     hero
-                    if !loadErrorDismissed && hasLoadError {
-                        loadErrorBanner
+                    if !visibleLoadErrors.isEmpty {
+                        loadErrorBanner(visibleLoadErrors)
                     }
                     tabPicker
                     if tab == .opencode {
@@ -68,6 +72,23 @@ struct ContentView: View {
                 .padding(.top, 14)
                 .padding(.bottom, 20)
             }
+        }
+        .task { refreshTodayCost() }
+        .onChange(of: store.accounts) { _, _ in
+            refreshTodayCost()
+        }
+        .onChange(of: scenePhase) { _, _ in
+            refreshTodayCost()
+        }
+        .onChange(of: store.loadError) { _, _ in
+            // 错误清空后再次出现（即使文案相同）也必须重新提醒。
+            dismissedLoadErrors = LoadErrorSource.opencodeAccount.resetting(in: dismissedLoadErrors)
+        }
+        .onChange(of: githubStore.loadError) { _, _ in
+            dismissedLoadErrors = LoadErrorSource.githubAccount.resetting(in: dismissedLoadErrors)
+        }
+        .onReceive(refreshClock) { _ in
+            refreshTodayCost()
         }
         .sheet(isPresented: $showingAdd) {
             AddEditAccountView(account: nil)
@@ -143,26 +164,24 @@ struct ContentView: View {
         .padding(.top, 30) // hiddenTitleBar 下给交通灯留空间
     }
 
-    /// 任一 Store 加载失败(accounts.json / github-accounts.json 损坏等)的红色警告横幅:
-    /// 红→橙渐变底(风格与 Theme.accent 渐变一致),账号错误优先第一行,GitHub 账号错误
-    /// 第二行;「知道了」仅本次会话隐藏(不改 Store.loadError)。demo 模式无 loadError,自动不出现。
-    private var loadErrorBanner: some View {
+    /// 任一 Store 加载失败的红色警告横幅。红→橙渐变底,账号错误优先第一行,
+    /// GitHub 账号错误第二行;「知道了」只确认当前可见来源,不改 Store.loadError。
+    private func loadErrorBanner(_ messages: [LoadErrorMessage]) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.title3)
                 .foregroundStyle(warningGradient)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 6) {
-                if let message = store.loadError {
-                    loadErrorLine(message)
-                }
-                if let message = githubStore.loadError {
-                    loadErrorLine(message)
+                ForEach(messages) { message in
+                    loadErrorLine(message.text)
                 }
             }
             Spacer(minLength: 8)
             Button {
-                loadErrorDismissed = true
+                dismissedLoadErrors = LoadErrorBannerModel.dismissing(
+                    messages,
+                    in: dismissedLoadErrors)
             } label: {
                 Text("知道了")
                     .font(.caption.weight(.semibold))

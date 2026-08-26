@@ -85,6 +85,17 @@ enum StepAppearance: Equatable, Sendable {
     case warning
 }
 
+/// decide 输出的注入动作。调用方按动作选择结果处理器，
+/// 绝不通过 JS 字符串内容反推流程分支。
+enum GitHubLoginAction: Equatable {
+    case none
+    case fillCredentials
+    case authorize
+    case fillOTP
+    case probeOTP
+    case readCookies
+}
+
 /// decide 的决策结果:下一步骤 + 要注入执行的 JS + 是否轮询 opencode cookie
 struct GitHubLoginDecision: Equatable {
     let step: GitHubLoginStep
@@ -93,18 +104,23 @@ struct GitHubLoginDecision: Equatable {
     /// 是否为内联 2FA 探测注入(凭据已提交后对 github.com 任意页面追加):
     /// 结果由视图解释——命中填码提交,未命中按现有规则继续(登录页未命中 → 转手动)
     let isOTPProbe: Bool
+    /// 显式动作标签；`javascript` 仅携带待执行代码
+    let action: GitHubLoginAction
 
     init(
         step: GitHubLoginStep,
         javascript: String?,
         pollCookie: Bool,
-        isOTPProbe: Bool = false
+        isOTPProbe: Bool = false,
+        action: GitHubLoginAction = .none
     ) {
         self.step = step
         self.javascript = javascript
         self.pollCookie = pollCookie
         self.isOTPProbe = isOTPProbe
+        self.action = action
     }
+
 }
 
 /// GitHub 自动登录服务:URL → 决策的纯函数状态机 + JS 片段构造 + cookie 提取。
@@ -172,7 +188,7 @@ struct GitHubLoginService {
             if path.contains("two-factor") {
                 if let totpCode, !totpCode.isEmpty {
                     return GitHubLoginDecision(
-                        step: .twoFactor, javascript: fillOTPJS(code: totpCode), pollCookie: false)
+                        step: .twoFactor, javascript: fillOTPJS(code: totpCode), pollCookie: false, action: .fillOTP)
                 }
                 return GitHubLoginDecision(
                     step: .needsManualIntervention("请在窗口中输入两步验证码,完成后等待自动捕获"),
@@ -192,7 +208,7 @@ struct GitHubLoginService {
             // 3) OAuth 授权页:会话已建立(刚登录完),直接点「Authorize」
             if path.contains("oauth/authorize") {
                 return GitHubLoginDecision(
-                    step: .githubLoginForm, javascript: authorizeJS(), pollCookie: false)
+                    step: .githubLoginForm, javascript: authorizeJS(), pollCookie: false, action: .authorize)
             }
             // 4) 登录表单 / 会话页(/login、/session、/sessions/...)
             if path.contains("/login") || path.contains("/session") {
@@ -208,7 +224,8 @@ struct GitHubLoginService {
                             step: .twoFactor,
                             javascript: probeAndFillOTPJS(code: totpCode),
                             pollCookie: false,
-                            isOTPProbe: true)
+                            isOTPProbe: true,
+                            action: .probeOTP)
                     }
                     return GitHubLoginDecision(
                         step: .needsManualIntervention("请在窗口中输入当前两步验证码,完成后等待自动捕获"),
@@ -217,7 +234,8 @@ struct GitHubLoginService {
                     return GitHubLoginDecision(
                         step: .githubLoginForm,
                         javascript: fillCredentialsJS(username: githubUsername, password: githubPassword),
-                        pollCookie: false)
+                        pollCookie: false,
+                        action: .fillCredentials)
                 default:
                     // 手动处理中/等待回跳等:不打断用户操作
                     return GitHubLoginDecision(step: state, javascript: nil, pollCookie: false)
@@ -232,7 +250,8 @@ struct GitHubLoginService {
                     step: state,
                     javascript: probeAndFillOTPJS(code: totpCode),
                     pollCookie: false,
-                    isOTPProbe: true)
+                    isOTPProbe: true,
+                    action: .probeOTP)
             }
             return GitHubLoginDecision(step: state, javascript: nil, pollCookie: false)
         }
@@ -242,7 +261,7 @@ struct GitHubLoginService {
             // 若页面仍是未登录态(如 SPA 登录页)则点击 GitHub 登录入口触发 OAuth
             let step: GitHubLoginStep =
                 (state == .idle || state == .loadingLoginPage) ? .loadingLoginPage : .waitingOAuthRedirect
-            return GitHubLoginDecision(step: step, javascript: readCookiesJS(), pollCookie: true)
+            return GitHubLoginDecision(step: step, javascript: readCookiesJS(), pollCookie: true, action: .readCookies)
         }
 
         // 其他域(验证码/风控中间页等):按当前状态延续,不打断流程

@@ -182,7 +182,7 @@ final class GitHubAccountStoreTests: XCTestCase {
             GitHubAccountInput(
                 username: "octocat", password: "P@ssw0rd-1",
                 credential: "GEZDGNBVGY3TQOJQ", kind: .totpSecret))
-        t.store.delete(account.id)
+        try t.store.delete(account.id)
         XCTAssertTrue(t.store.accounts.isEmpty)
         XCTAssertNil(t.keychain.storage["\(account.id.uuidString)-password"])
         XCTAssertNil(t.keychain.storage["\(account.id.uuidString)-credential"])
@@ -416,5 +416,76 @@ final class GitHubAccountStoreTests: XCTestCase {
         let current = try JSONDecoder().decode([GitHubAccount].self, from: Data(contentsOf: t.fileURL))
         XCTAssertEqual(current.count, 3) // 主文件已正常更新,保存未被快照失败阻断
         XCTAssertNil(t.store.loadError)
+    }
+}
+
+// MARK: - P0:保存失败可见化与批量导入一致性
+
+extension GitHubAccountStoreTests {
+    /// 磁盘写失败时，单个添加必须回滚内存和 Keychain。
+    func testAddSaveFailureRollsBackMemoryAndKeychain() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: t.dir.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: t.dir.path) }
+
+        XCTAssertThrowsError(try t.store.add(GitHubAccountInput(username: "alice", password: "pass123456")))
+        XCTAssertTrue(t.store.accounts.isEmpty)
+        XCTAssertTrue(t.keychain.storage.isEmpty)
+    }
+
+    /// 磁盘写失败时，删除必须保留内存账号与凭据；成功后才清理 Keychain。
+    func testDeleteSaveFailureKeepsMemoryAndKeychain() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        let account = try t.store.add(GitHubAccountInput(username: "alice", password: "pass123456"))
+        let passwordKey = "\(account.id.uuidString)-password"
+
+        // 目录只读，删除后的元数据保存必然失败。
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: t.dir.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: t.dir.path) }
+
+        XCTAssertThrowsError(try t.store.delete(account.id))
+        XCTAssertEqual(t.store.accounts.count, 1)
+        XCTAssertEqual(t.keychain.get(passwordKey), "pass123456")
+
+        // 恢复目录权限后再次删除应完整提交。
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: t.dir.path)
+        try t.store.delete(account.id)
+        XCTAssertTrue(t.store.accounts.isEmpty)
+        XCTAssertNil(t.keychain.get(passwordKey))
+    }
+
+    /// 批量导入在元数据保存失败时整体回滚：不留半批账号或孤儿凭据。
+    func testImportBatchSaveFailureRollsBackAllRows() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: t.dir.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: t.dir.path) }
+
+        let rows = [
+            GitHubImportRow(lineNumber: 1, username: "alice", password: "alice-pass-123"),
+            GitHubImportRow(lineNumber: 2, username: "bob", password: "bob-pass-456",
+                            credential: "JBSWY3DPEHPK3PXP", kind: .totpSecret),
+        ]
+
+        XCTAssertThrowsError(try t.store.importBatch(rows))
+        XCTAssertTrue(t.store.accounts.isEmpty)
+        XCTAssertTrue(t.keychain.storage.isEmpty)
+    }
+
+    /// 批量导入部分跳过时仍能成功提交有效行（防止新回滚逻辑破坏行级独立语义）。
+    func testImportBatchWithSkippedRowsStillCommitsValidRows() throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+
+        let summary = try t.store.importBatch([
+            GitHubImportRow(lineNumber: 1, username: "alice", password: "alice-pass-123"),
+            GitHubImportRow(lineNumber: 2, username: "", password: "short"),
+        ])
+
+        XCTAssertEqual(summary.imported, 1)
+        XCTAssertEqual(summary.skipped.count, 1)
+        XCTAssertEqual(t.store.accounts.first?.username, "alice")
     }
 }

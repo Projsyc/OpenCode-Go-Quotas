@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - 错误类型(与原项目错误文案一致)
 
-enum QuotaError: LocalizedError {
+enum QuotaError: LocalizedError, Equatable {
     case invalidWorkspaceId(String)
     case invalidAuthCookie(String)
     case authFailed            // 401 / 403
@@ -10,6 +10,8 @@ enum QuotaError: LocalizedError {
     case httpError(Int)
     case endpointGone          // /_server 返回 404
     case parseFailed(String)
+    /// 历史分页请求越界/服务端明确返回空页;这是正常翻页终点,不是解析故障。
+    case emptyPage
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +22,17 @@ enum QuotaError: LocalizedError {
         case .httpError(let c): return "请求失败 (HTTP \(c))"
         case .endpointGone: return "RPC 端点不可达 (HTTP 404)，OpenCode 服务接口可能已变更"
         case .parseFailed(let m): return m
+        case .emptyPage: return "没有更多用量记录"
+        }
+    }
+
+    /// 输入校验与页面/RPC 结构变化属于确定性错误;自动重试不会改变结果。
+    var isPermanent: Bool {
+        switch self {
+        case .invalidWorkspaceId, .invalidAuthCookie, .parseFailed:
+            return true
+        case .authFailed, .sessionExpired, .httpError, .endpointGone, .emptyPage:
+            return false
         }
     }
 }
@@ -62,8 +75,16 @@ private enum RX {
 struct QuotaClient: Sendable {
     let session: URLSession
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = QuotaClient.makeDefaultSession()) {
         self.session = session
+    }
+
+    /// 抓取页面/RPC 的专用会话:限制单次等待时间，避免慢节点拖长全量刷新。
+    private static func makeDefaultSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 45
+        return URLSession(configuration: configuration)
     }
 
     private static let userAgent =
@@ -73,6 +94,9 @@ struct QuotaClient: Sendable {
     static let workspaceIDRegex: NSRegularExpression =
         try! NSRegularExpression(pattern: #"^wrk_[a-zA-Z0-9]+$"#)
     static let cookiePrefix = "Fe26."
+
+    /// 单请求超时;session 配置外再显式写入 URLRequest，测试/mock 也可见。
+    static let requestTimeout: TimeInterval = 20
 
     static func validateWorkspaceId(_ workspaceId: String) -> String? {
         let ws = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -104,12 +128,14 @@ struct QuotaClient: Sendable {
         let url = URL(string: "https://opencode.ai/workspace/\(encoded)/go")!
 
         var req = URLRequest(url: url)
+        req.timeoutInterval = Self.requestTimeout
         req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue(
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             forHTTPHeaderField: "Accept")
         req.setValue("auth=\(cookie)", forHTTPHeaderField: "Cookie")
 
+        try Task.checkCancellation()
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw QuotaError.httpError(-1) }
 
@@ -210,6 +236,7 @@ struct QuotaClient: Sendable {
         ]
 
         var req = URLRequest(url: URL(string: "https://opencode.ai/_server")!)
+        req.timeoutInterval = Self.requestTimeout
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("*/*", forHTTPHeaderField: "Accept")
@@ -224,6 +251,7 @@ struct QuotaClient: Sendable {
             forHTTPHeaderField: "x-server-id")
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
+        try Task.checkCancellation()
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw QuotaError.httpError(-1) }
 
@@ -242,7 +270,8 @@ struct QuotaClient: Sendable {
 
         let items = Self.parseHistoryBody(body)
         if items.isEmpty {
-            throw QuotaError.parseFailed("未能解析到使用历史，OpenCode 接口结构可能已变更")
+            // cursor > 0 的空响应是翻页终点；首页空响应仍视为结构变化，避免误报“没有更多记录”。
+            throw cursor > 0 ? QuotaError.emptyPage : QuotaError.parseFailed("未能解析到使用历史，OpenCode 接口结构可能已变更")
         }
         return items.sorted { $0.timeCreated > $1.timeCreated }
     }
@@ -280,10 +309,11 @@ struct QuotaClient: Sendable {
             diagContext(in: slice, around: m.range, radius: historyDiagContextRadius))
     }
 
-    /// 响应体是 SolidStart 序列化数据:每条记录以 id:"usg_xxx" 为锚点切块,逐字段正则提取
+    /// 响应体是 SolidStart 序列化数据:每条记录以 id:"usg_xxx" 为锚点切块,逐字段正则提取。
     /// - Parameter diag: cost 异常诊断输出(测试注入临时目录;默认 ~/Library/Logs/OpenCodeGo/history.log)
     static func parseHistoryBody(
-        _ body: String, diag: HistoryDiagSink = HistoryDiagSink()
+        _ body: String,
+        diag: TextAppendLogSink = .history()
     ) -> [UsageHistoryItem] {
         let anchorPattern = #"\#(Self.historyFieldBoundary)id:\s*"usg_[A-Za-z0-9]+""#
         let anchors = RX.allRanges(anchorPattern, in: body)

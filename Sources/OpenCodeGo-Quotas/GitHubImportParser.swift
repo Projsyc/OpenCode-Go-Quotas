@@ -72,16 +72,15 @@ enum GitHubImportParser {
                     : "列数过多(应为 2~3 列,实际 \(fields.count) 列)")
         }
 
-        let username = fields[0]
-        let password = fields[1]
-        guard !username.isEmpty else {
-            throw GitHubParseError.invalidRow(line: lineNumber, reason: "用户名不能为空")
-        }
-        guard !username.contains(where: { $0.isWhitespace }) else {
-            throw GitHubParseError.invalidRow(line: lineNumber, reason: "用户名不能包含空白字符")
-        }
-        guard !password.isEmpty, password.count >= 6 else {
-            throw GitHubParseError.invalidRow(line: lineNumber, reason: "密码不能为空且至少 6 个字符")
+        let username: String
+        let password: String
+        do {
+            username = try GitHubAccountStoreError.validatedUsername(fields[0])
+            password = try GitHubAccountStoreError.validatedPassword(fields[1])
+        } catch let validationError as GitHubAccountStoreError {
+            throw GitHubParseError.invalidRow(
+                line: lineNumber,
+                reason: validationError.errorDescription ?? "账号数据无效")
         }
 
         if fields.count == 3 {
@@ -176,7 +175,7 @@ enum GitHubImportParser {
     ) throws -> (fields: [String], passwordHadEdgeWhitespace: Bool) {
         let (raw, quoted) = try csvSplit(line, delimiter: delimiter, lineNumber: lineNumber)
         let flag = raw.count > 1
-            && passwordHasEdgeWhitespace(
+            && GitHubPasswordWhitespacePolicy.isNotableCSVField(
                 raw[1],
                 treatAsLiteral: quoted.count > 1 && quoted[1])
         return (raw.map(trimField), flag)
@@ -189,13 +188,7 @@ enum GitHubImportParser {
     /// - 未加引号:单侧 1 个空白是分隔符约定(如 `user1, pass123` 的单个空格,不算密码
     ///   内容)→ 不算;单侧 ≥ 2 个空白 → 提示。
     static func passwordHasEdgeWhitespace(_ field: String, treatAsLiteral: Bool = false) -> Bool {
-        let trimmed = field.trimmingCharacters(in: .whitespaces)
-        // 纯空白字段(trim 后为空)由「密码不能为空且至少 6 个字符」校验兜底,不算提示场景
-        guard !trimmed.isEmpty, trimmed != field else { return false }
-        if treatAsLiteral { return true }
-        let leading = field.count - field.drop(while: { $0.isWhitespace }).count
-        let trailing = field.count - field.reversed().drop(while: { $0.isWhitespace }).count
-        return leading > 1 || trailing > 1
+        GitHubPasswordWhitespacePolicy.isNotableCSVField(field, treatAsLiteral: treatAsLiteral)
     }
 
     /// 按指定分隔符切分一行,支持双引号包裹字段与 `""` 转义引号;引号未闭合抛错。

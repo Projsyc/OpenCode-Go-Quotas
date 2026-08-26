@@ -296,8 +296,49 @@ final class AccountPersistenceTests: XCTestCase {
         XCTAssertNil(t.store.accounts[0].historyError)
     }
 
-    /// 空页终止:首页即空 → history 为空数组,不报错
-    func testLoadHistoryEmptyPageTerminatesGracefully() async throws {
+    /// 翻页空响应是正常终点:首页有数据、第二页为空 → 返回首页数据且不报错
+    func testLoadHistoryLaterEmptyPageTerminatesGracefully() async throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "空尾页", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        let base = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        var cursors: [Int] = []
+        MockURLProtocol.handler = { request in
+            let cursor = requestCursor(request)
+            cursors.append(cursor)
+            let body = cursor == 0
+                ? HistoryPage.body(cursor: 0, count: 25, baseTime: base, step: 3600)
+                : ""
+            return okResponse(request.url!, body: body)
+        }
+
+        await t.store.loadHistory(t.store.accounts[0])
+        XCTAssertEqual(t.store.accounts[0].history?.count, 25)
+        XCTAssertNil(t.store.accounts[0].historyError)
+        XCTAssertEqual(cursors, [0, 1], "空页后不得继续请求")
+    }
+
+    /// 首页空响应仍视为解析故障：页面结构变化不能被误判为“没有历史记录”
+    func testLoadHistoryFirstEmptyPageReportsParseFailure() async throws {
+        let t = makeTempStore()
+        addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
+        _ = try t.store.addAccount(name: "结构变化", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
+
+        var requests = 0
+        MockURLProtocol.handler = { request in
+            requests += 1
+            return okResponse(request.url!, body: "")
+        }
+
+        await t.store.loadHistory(t.store.accounts[0])
+        XCTAssertNil(t.store.accounts[0].history)
+        XCTAssertEqual(t.store.accounts[0].historyError, "未能解析到使用历史，OpenCode 接口结构可能已变更")
+        XCTAssertEqual(requests, 1)
+    }
+
+    /// 首页非空但无记录锚点 → 显式解析失败，避免结构变化被误判为“没有历史”
+    func testLoadHistoryFirstNonRecordPageReportsParseFailure() async throws {
         let t = makeTempStore()
         addTeardownBlock { try? FileManager.default.removeItem(at: t.dir) }
         _ = try t.store.addAccount(name: "空历史", workspaceId: validWorkspace, authCookie: validCookie, notes: "")
@@ -309,8 +350,8 @@ final class AccountPersistenceTests: XCTestCase {
         }
 
         await t.store.loadHistory(t.store.accounts[0])
-        XCTAssertEqual(t.store.accounts[0].history, [])
-        XCTAssertNil(t.store.accounts[0].historyError)
+        XCTAssertNil(t.store.accounts[0].history)
+        XCTAssertEqual(t.store.accounts[0].historyError, "未能解析到使用历史，OpenCode 接口结构可能已变更")
         XCTAssertEqual(requests, 1)
     }
 

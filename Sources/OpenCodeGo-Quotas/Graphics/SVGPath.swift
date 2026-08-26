@@ -1,3 +1,4 @@
+import os
 import SwiftUI
 
 /// 极简 SVG path data 解析器:支持 M/m L/l H/h V/v C/c S/s Z/z,
@@ -7,6 +8,25 @@ struct SVGPath: Shape {
     let data: String
 
     func path(in rect: CGRect) -> Path {
+        // 只缓存设计坐标系中的基础路径；不同 frame 仅重复一次低开销仿射变换。
+        // 相比按 rect 缓存，窗口连续缩放不会产生大量只差尺寸的缓存项。
+        let basePath = SVGPathCache.shared.path(for: data) {
+            Self.parse(data)
+        }
+
+        let bbox = basePath.boundingRect
+        guard !bbox.isNull, bbox.width > 0, bbox.height > 0 else { return basePath }
+        let scale = min(rect.width / bbox.width, rect.height / bbox.height)
+        var transform = CGAffineTransform(translationX: -bbox.minX, y: -bbox.minY)
+        transform = transform.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        transform = transform.concatenating(CGAffineTransform(
+            translationX: rect.minX + (rect.width - bbox.width * scale) / 2,
+            y: rect.minY + (rect.height - bbox.height * scale) / 2))
+        return basePath.applying(transform)
+    }
+
+    /// 解析 SVG path data 为设计坐标系中的 SwiftUI Path。
+    nonisolated static func parse(_ data: String) -> Path {
         var path = Path()
         var cursor = CGPoint.zero
         var start = CGPoint.zero
@@ -89,16 +109,7 @@ struct SVGPath: Shape {
             }
         }
 
-        // 缩放到目标 rect(保持宽高比,居中)
-        let bbox = path.boundingRect
-        guard !bbox.isNull, bbox.width > 0, bbox.height > 0 else { return path }
-        let scale = min(rect.width / bbox.width, rect.height / bbox.height)
-        var transform = CGAffineTransform(translationX: -bbox.minX, y: -bbox.minY)
-        transform = transform.concatenating(CGAffineTransform(scaleX: scale, y: scale))
-        transform = transform.concatenating(CGAffineTransform(
-            translationX: rect.minX + (rect.width - bbox.width * scale) / 2,
-            y: rect.minY + (rect.height - bbox.height * scale) / 2))
-        return path.applying(transform)
+        return path
     }
 
     // MARK: - tokenizer
@@ -108,7 +119,7 @@ struct SVGPath: Shape {
         let number: Double?
     }
 
-    private func tokenize(_ data: String) -> [Token] {
+    private static func tokenize(_ data: String) -> [Token] {
         var tokens: [Token] = []
         var numberBuffer = ""
         let commands: Set<Character> = ["M", "m", "L", "l", "H", "h", "V", "v", "C", "c", "S", "s", "Z", "z"]
@@ -133,6 +144,52 @@ struct SVGPath: Shape {
         }
         flushNumber()
         return tokens
+    }
+}
+
+/// 线程安全的 SVG 基础路径缓存。装饰图形数量有限，同时限制容量，
+/// 防止运行时动态生成的 path data 占用无界内存。
+final class SVGPathCache: @unchecked Sendable {
+    static let shared = SVGPathCache()
+    static let maximumEntryCount = 256
+
+    private struct State {
+        var paths: [String: Path] = [:]
+        var insertionOrder: [String] = []
+    }
+
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+
+    private let capacity: Int
+
+    init(capacity: Int = SVGPathCache.maximumEntryCount) {
+        self.capacity = max(1, capacity)
+    }
+
+    var count: Int {
+        lock.withLock(\.insertionOrder.count)
+    }
+
+    func path(for data: String, make: () -> Path) -> Path {
+        if let cachedPath = lock.withLock({ $0.paths[data] }) {
+            return cachedPath
+        }
+
+        let newPath = make()
+        lock.withLock { state in
+            guard state.paths[data] == nil else { return }
+            state.paths[data] = newPath
+            state.insertionOrder.append(data)
+            while state.insertionOrder.count > capacity {
+                let oldest = state.insertionOrder.removeFirst()
+                state.paths.removeValue(forKey: oldest)
+            }
+        }
+        return newPath
+    }
+
+    func removeAll() {
+        lock.withLock { $0 = State() }
     }
 }
 

@@ -11,6 +11,10 @@ struct GitHubImportView: View {
     @State private var showingFileImporter = false
     @State private var outcome: ImportOutcome?
     @State private var loadError: String?
+    @State private var previewTask: Task<Void, Never>?
+    /// 过期结果守卫：即使旧 Task 未及时观察到取消，也不能覆盖最新预览。
+    @State private var previewGeneration = 0
+    @State private var isParsingPreview = false
 
     /// 批量导入结果:部分成功(停留展示)或全部失败(错误提示)
     enum ImportOutcome {
@@ -33,6 +37,15 @@ struct GitHubImportView: View {
             formatHint
             editor
             actionRow
+            if isParsingPreview {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在解析预览…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             loadErrorView
             if !preview.isEmpty {
                 previewList
@@ -48,8 +61,13 @@ struct GitHubImportView: View {
         }
         .padding(24)
         .frame(width: 580)
-        .onAppear { refreshPreview() }
+        .onAppear { refreshPreview(immediate: true) }
         .onChange(of: text) { _, _ in refreshPreview() }
+        .onDisappear {
+            previewGeneration &+= 1
+            previewTask?.cancel()
+            previewTask = nil
+        }
         .fileImporter(isPresented: $showingFileImporter, allowedContentTypes: [.plainText, .commaSeparatedText]) { result in
             loadFile(result)
         }
@@ -111,11 +129,12 @@ struct GitHubImportView: View {
             .buttonStyle(.bordered)
             Spacer()
             Button {
-                refreshPreview()
+                refreshPreview(immediate: true)
             } label: {
                 Label("解析预览", systemImage: "text.magnifyingglass")
             }
             .buttonStyle(.bordered)
+            .disabled(isParsingPreview)
         }
     }
 
@@ -137,7 +156,7 @@ struct GitHubImportView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             ScrollView {
-                VStack(spacing: 4) {
+                LazyVStack(spacing: 4) {
                     ForEach(preview) { row in
                         rowView(row)
                     }
@@ -208,7 +227,7 @@ struct GitHubImportView: View {
                 systemImage: isPartial ? "info.circle" : "exclamationmark.triangle.fill")
                 .font(.callout.weight(.medium))
                 .foregroundStyle(isPartial ? .orange : .red)
-            ForEach(outcome.skipped, id: \.lineNumber) { skip in
+            ForEach(outcome.skipped) { skip in
                 Text(Self.skipText(skip))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -243,16 +262,42 @@ struct GitHubImportView: View {
             .buttonStyle(.borderedProminent)
             .tint(Theme.accentSolid)
             .keyboardShortcut(.defaultAction)
-            .disabled(validCount == 0)
+            .disabled(validCount == 0 || isParsingPreview)
         }
     }
 
     // MARK: - 动作
 
-    private func refreshPreview() {
-        preview = Self.previewRows(from: text)
+    private func refreshPreview(immediate: Bool = false) {
+        previewGeneration &+= 1
+        let generation = previewGeneration
+        let input = text
+
+        // 编辑期间立刻清掉旧导入结果，避免用户根据已失效的摘要操作。
         outcome = nil
         loadError = nil
+        isParsingPreview = true
+
+        previewTask?.cancel()
+        previewTask = Task { @MainActor in
+            do {
+                let rows: [GitHubImportPreviewRow]
+                if immediate {
+                    rows = await GitHubImportPreviewEngine.parse(input)
+                } else {
+                    rows = try await GitHubImportPreviewEngine.parseAfterDebounce(input)
+                }
+                guard !Task.isCancelled, generation == previewGeneration else { return }
+                preview = rows
+                isParsingPreview = false
+            } catch is CancellationError {
+                // 新请求已接管；由新请求负责更新状态。
+            } catch {
+                guard generation == previewGeneration else { return }
+                isParsingPreview = false
+                loadError = "预览解析失败:\(error.localizedDescription)"
+            }
+        }
     }
 
     private func importAll() {
@@ -301,7 +346,7 @@ struct GitHubImportView: View {
 
     /// 将导入文本逐行解析为预览行:有效行携带解析结果(供导入),错误行携带原因;
     /// 空行/注释行跳过。按行拆分与「空行/注释跳过」判定统一走 `GitHubImportParser.parseRow`。
-    static func previewRows(from text: String) -> [GitHubImportPreviewRow] {
+    nonisolated static func previewRows(from text: String) -> [GitHubImportPreviewRow] {
         let lines = GitHubImportParser.splitLines(text)
         var rows: [GitHubImportPreviewRow] = []
         for (index, raw) in lines.enumerated() {
@@ -333,7 +378,7 @@ struct GitHubImportView: View {
     }
 
     /// 从一行文本里尽量提取用户名(首个非分隔符字段),仅供错误行展示
-    private static func usernameHint(from line: String) -> String {
+    private nonisolated static func usernameHint(from line: String) -> String {
         line.split(whereSeparator: { $0 == "," || $0 == ";" || $0 == "\t" || $0.isWhitespace })
             .first.map(String.init) ?? ""
     }

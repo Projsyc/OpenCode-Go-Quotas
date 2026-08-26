@@ -26,6 +26,46 @@ final class GitHubLoginServiceTests: XCTestCase {
         XCTAssertTrue(js.contains("\"s3cret\""))
     }
 
+    func testDecideProducesExplicitActions() {
+        let credentials = GitHubLoginService.decide(
+            for: url("https://github.com/login"),
+            githubUsername: "u", githubPassword: "p",
+            totpCode: nil, state: .loadingLoginPage)
+        XCTAssertEqual(credentials.action, .fillCredentials)
+
+        let authorize = GitHubLoginService.decide(
+            for: url("https://github.com/login/oauth/authorize"),
+            githubUsername: "u", githubPassword: "p",
+            totpCode: nil, state: .twoFactor)
+        XCTAssertEqual(authorize.action, .authorize)
+
+        let otp = GitHubLoginService.decide(
+            for: url("https://github.com/sessions/two-factor"),
+            githubUsername: "u", githubPassword: "p",
+            totpCode: "123456", state: .fillingCredentials)
+        XCTAssertEqual(otp.action, .fillOTP)
+        XCTAssertFalse(otp.isOTPProbe)
+
+        let inlineOTP = GitHubLoginService.decide(
+            for: url("https://github.com/login"),
+            githubUsername: "u", githubPassword: "p",
+            totpCode: "123456", state: .fillingCredentials)
+        XCTAssertEqual(inlineOTP.action, .probeOTP)
+        XCTAssertTrue(inlineOTP.isOTPProbe)
+
+        let readCookies = GitHubLoginService.decide(
+            for: url("https://opencode.ai/workspace/wrk_1"),
+            githubUsername: "u", githubPassword: "p",
+            totpCode: nil, state: .waitingOAuthRedirect)
+        XCTAssertEqual(readCookies.action, .readCookies)
+
+        let noInjection = GitHubLoginService.decide(
+            for: URL(string: "https://example.com/risk"),
+            githubUsername: "u", githubPassword: "p",
+            totpCode: nil, state: .waitingOAuthRedirect)
+        XCTAssertEqual(noInjection.action, .none)
+    }
+
     func testDecideGithubSessionsPageAlsoFills() {
         let d = GitHubLoginService.decide(
             for: url("https://github.com/session"), githubUsername: "u", githubPassword: "p",
