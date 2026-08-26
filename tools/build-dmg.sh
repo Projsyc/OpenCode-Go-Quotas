@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist/OpenCode-Go-Quotas.app"
 BIN="$ROOT/.build/release/OpenCode-Go-Quotas"
-OUT="$HOME/Desktop/OpenCode-Go-Quotas-0.1.0.dmg"
+OUT="$HOME/Desktop/OpenCode-Go-Quotas-0.1.1.dmg"
 
 echo "==> 1/5 渲染图标"
 swift "$ROOT/tools/render-icon.swift"

@@ -8,7 +8,7 @@ set -euo pipefail
 # ---- 变量置顶(按需修改) ----
 APP_NAME="OpenCode-Go-Quotas"
 BUNDLE_ID="${BUNDLE_ID:-com.acccan.opencode-go}"
-VERSION="0.1.0"
+VERSION="0.1.1"
 MIN_OS="14.0"
 CONFIGURATION="${1:-release}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

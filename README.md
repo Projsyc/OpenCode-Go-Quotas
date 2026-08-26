@@ -69,7 +69,7 @@ swift run OpenCode-Go-Quotas --demo
 bash scripts/bundle-app.sh
 open dist/OpenCode-Go-Quotas.app
 
-# 一键产出安装包(渲染图标 → 生成 icns → 打包 dmg,输出 ~/Desktop/OpenCode-Go-Quotas-0.1.0.dmg)
+# 一键产出安装包(渲染图标 → 生成 icns → 打包 dmg,输出 ~/Desktop/OpenCode-Go-Quotas-0.1.1.dmg)
 bash tools/build-dmg.sh
 ```
 
